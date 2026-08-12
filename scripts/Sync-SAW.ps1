@@ -754,9 +754,7 @@ function Test-RemoteDownloadRequired {
         return $true
     }
     return $Local.Length -ne $Remote.Length -or
-        (
-            $Remote.LastModified - $Local.LastWriteTimeUtc
-        ).Duration() -gt [TimeSpan]::FromSeconds(2)
+        $Remote.LastModified.UtcDateTime.Ticks -ne $Local.LastWriteTimeUtc.UtcDateTime.Ticks
 }
 
 function Test-SawInternalBlob {
@@ -1061,14 +1059,19 @@ function Publish-SawSyncFlags {
                 continue
             }
             $markerPath = Get-SawMarkerPath -RelativePath $local.RelativePath
-            [void]$desiredMarkers.Add($markerPath)
-
             $source = $null
             $marker = $null
             [void]$remoteByPath.TryGetValue($local.RelativePath, [ref]$source)
             [void]$remoteByPath.TryGetValue($markerPath, [ref]$marker)
             if (
-                $null -ne $source -and
+                $null -eq $source -or
+                (Test-RemoteDownloadRequired -Remote $source -Local $local)
+            ) {
+                continue
+            }
+            [void]$desiredMarkers.Add($markerPath)
+
+            if (
                 $null -ne $marker -and
                 $marker.LastModified -ge $source.LastModified
             ) {
@@ -1109,6 +1112,43 @@ function Publish-SawSyncFlags {
                             -ErrorAction Stop
                     })
             }
+        }
+
+        $latestRemoteFiles = @(
+            Get-RemoteBlobRecords -ContainerName $ContainerName -Context $Context
+        )
+        $latestRemoteByPath = New-RecordDictionary `
+            -Records $latestRemoteFiles `
+            -Property 'Name'
+        foreach ($local in @($LocalFiles)) {
+            if ($null -eq $local) {
+                continue
+            }
+
+            $source = $null
+            [void]$latestRemoteByPath.TryGetValue($local.RelativePath, [ref]$source)
+            if (
+                $null -ne $source -and
+                -not (Test-RemoteDownloadRequired -Remote $source -Local $local)
+            ) {
+                continue
+            }
+
+            $markerPath = Get-SawMarkerPath -RelativePath $local.RelativePath
+            if (-not $latestRemoteByPath.ContainsKey($markerPath)) {
+                continue
+            }
+            [void](Invoke-SawStorageOperation `
+                -Description "Deleting stale SAW marker '$markerPath'" `
+                -IgnoreNotFound `
+                -Operation {
+                    Remove-AzStorageBlob `
+                        -Container $ContainerName `
+                        -Blob $markerPath `
+                        -Context $Context `
+                        -Force `
+                        -ErrorAction Stop
+                })
         }
     }
     finally {
