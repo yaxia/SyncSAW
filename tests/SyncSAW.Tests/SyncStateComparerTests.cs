@@ -45,4 +45,20 @@ public sealed class SyncStateComparerTests
             new RemoteBlobInfo("file.txt", timestamp.AddSeconds(5), 10)));
     }
 
+    [Fact]
+    public void SyncItem_ExposesLastModifiedInMachineLocalTime()
+    {
+        var utc = DateTimeOffset.Parse("2026-08-12T05:00:00Z");
+        var item = new SyncItem(
+            "file.txt",
+            SyncItemState.InSync,
+            utc,
+            10,
+            "None",
+            null);
+
+        Assert.Equal(utc.ToLocalTime(), item.LocalLastModified);
+        Assert.Equal(TimeZoneInfo.Local.GetUtcOffset(utc), item.LocalLastModified?.Offset);
+    }
+
 }

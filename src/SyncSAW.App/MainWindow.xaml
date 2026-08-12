@@ -484,9 +484,9 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Width="165"
-                                                Header="Last modified"
-                                                Binding="{Binding LastModified, StringFormat={}{0:MMM d, yyyy h:mm tt}}"/>
+                            <DataGridTextColumn Width="185"
+                                                Header="Last modified (local)"
+                                                Binding="{Binding LocalLastModified, StringFormat={}{0:MMM d, yyyy h:mm tt}}"/>
                             <DataGridTemplateColumn Width="100" Header="Size">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>

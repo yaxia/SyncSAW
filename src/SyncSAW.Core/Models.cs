@@ -58,7 +58,10 @@ public sealed record SyncItem(
     long? Size,
     string Action,
     string? Error,
-    bool SyncedToSaw = false);
+    bool SyncedToSaw = false)
+{
+    public DateTimeOffset? LocalLastModified => LastModified?.ToLocalTime();
+}
 
 public sealed record SyncSnapshot(
     IReadOnlyList<SyncItem> Items,
