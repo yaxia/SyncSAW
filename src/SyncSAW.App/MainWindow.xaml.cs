@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private bool _initialized;
     private bool _isShuttingDown;
     private bool _credentialValid;
+    private bool _settingsPersistenceWarningShown;
     private DateTimeOffset _nextAutomaticSyncUtc;
 
     public MainWindow()
@@ -559,9 +560,38 @@ public partial class MainWindow : Window
 
     private async Task SaveSettingsAsync()
     {
-        if (_initialized)
+        if (!_initialized)
+        {
+            return;
+        }
+
+        try
         {
             await _settingsStore.SaveAsync(CaptureSettings(), _lifetime.Token);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            // App shutdown.
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            SetStatus($"Settings could not be saved: {exception.Message}");
+            await TryLogErrorAsync("Save settings", exception);
+            if (!_settingsPersistenceWarningShown)
+            {
+                _settingsPersistenceWarningShown = true;
+                MessageBox.Show(
+                    this,
+                    $"SyncSAW could not save settings to:{Environment.NewLine}" +
+                    $"{SettingsStore.DefaultPath}{Environment.NewLine}{Environment.NewLine}" +
+                    $"{exception.Message}{Environment.NewLine}{Environment.NewLine}" +
+                    "The application will continue running, but these changes may not be " +
+                    "available after restart.",
+                    "Settings were not saved",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
         }
     }
 
@@ -784,6 +814,19 @@ public partial class MainWindow : Window
 
     private Task LogErrorAsync(string context, Exception exception) =>
         _operationLog.WriteEventAsync($"ERROR {context}: {exception}");
+
+    private async Task TryLogErrorAsync(string context, Exception exception)
+    {
+        try
+        {
+            await LogErrorAsync(context, exception);
+        }
+        catch (Exception logException) when (
+            logException is IOException or UnauthorizedAccessException)
+        {
+            Debug.WriteLine($"Unable to write SyncSAW operation log: {logException}");
+        }
+    }
 
     private void ReportBackgroundError(Exception exception)
     {

@@ -75,9 +75,13 @@ Remote file controls support upload/update, download, opening a temporary downlo
 Every AzCopy child-process invocation, exit code, duration, standard output, and
 standard error is appended to daily local logs:
 
-The GUI writes `syncsaw-YYYYMMDD.log` beside `SyncSAW.App.exe`. It also stores
-`settings.json` there; an existing LocalAppData settings file is migrated on
-first launch. The application directory must therefore be writable.
+The GUI stores non-secret settings at
+`%LOCALAPPDATA%\SyncSAW\settings.json` and writes daily operation logs under
+`%LOCALAPPDATA%\SyncSAW\Logs`. It can therefore run as a standard user when
+installed under `C:\Program Files`. On first launch after upgrading, an older
+`settings.json` beside `SyncSAW.App.exe` is copied to LocalAppData when no
+LocalAppData settings file exists; the original is left untouched because the
+installation directory may be read-only.
 
 SAS query strings and signatures are redacted before writing. AzCopy also keeps
 its own diagnostic logs under `%USERPROFILE%\.azcopy`.

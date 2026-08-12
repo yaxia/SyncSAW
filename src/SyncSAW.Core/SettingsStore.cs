@@ -21,13 +21,10 @@ public sealed class SettingsStore
         _legacySettingsPath = legacySettingsPath ?? LegacyPath;
     }
 
-    public static string DefaultPath => Path.Combine(
-        AppContext.BaseDirectory,
-        "settings.json");
+    public static string DefaultPath => ApplicationDataPaths.SettingsPath;
 
     private static string LegacyPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "SyncSAW",
+        AppContext.BaseDirectory,
         "settings.json");
 
     public async Task<SyncSettings> LoadAsync(CancellationToken cancellationToken = default)
@@ -42,7 +39,6 @@ public sealed class SettingsStore
 
             var migratedSettings = await ReadAsync(_legacySettingsPath, cancellationToken);
             await SaveAsync(migratedSettings, cancellationToken);
-            File.Delete(_legacySettingsPath);
             return migratedSettings;
         }
 

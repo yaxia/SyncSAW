@@ -13,7 +13,7 @@ public sealed partial class OperationLog
         _directory = directory ?? DefaultDirectory;
     }
 
-    public static string DefaultDirectory => AppContext.BaseDirectory;
+    public static string DefaultDirectory => ApplicationDataPaths.LogDirectory;
 
     public async Task WriteCommandStartedAsync(
         string executable,
