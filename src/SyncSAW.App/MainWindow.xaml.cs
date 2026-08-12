@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private bool _isShuttingDown;
     private bool _credentialValid;
     private bool _deletionQueuedOrRunning;
+    private bool _restoringFileSelection;
     private bool _settingsPersistenceWarningShown;
     private DateTimeOffset _nextAutomaticSyncUtc;
 
@@ -385,11 +386,7 @@ public partial class MainWindow : Window
             var snapshot = await _azCopy.GetSnapshotAsync(settings, cancellationToken);
             await Dispatcher.InvokeAsync(() =>
             {
-                _items.Clear();
-                foreach (var item in snapshot.Items)
-                {
-                    _items.Add(item);
-                }
+                ReplaceFileItemsPreservingSelection(snapshot.Items);
 
                 _remotePaths.Clear();
                 foreach (var blob in snapshot.RemoteBlobs)
@@ -655,8 +652,49 @@ public partial class MainWindow : Window
 
     private void FilesDataGrid_SelectionChanged(
         object sender,
-        SelectionChangedEventArgs e) =>
-        UpdateFileActionButtons();
+        SelectionChangedEventArgs e)
+    {
+        if (!_restoringFileSelection)
+        {
+            UpdateFileActionButtons();
+        }
+    }
+
+    private void ReplaceFileItemsPreservingSelection(IReadOnlyList<SyncItem> items)
+    {
+        var selectedPaths = FilesDataGrid.SelectedItems
+            .OfType<SyncItem>()
+            .Select(item => item.Path)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        _restoringFileSelection = true;
+        try
+        {
+            FilesDataGrid.SelectedItems.Clear();
+            _items.Clear();
+            foreach (var item in items)
+            {
+                _items.Add(item);
+            }
+
+            if (selectedPaths.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var item in _items)
+            {
+                if (selectedPaths.Contains(item.Path))
+                {
+                    FilesDataGrid.SelectedItems.Add(item);
+                }
+            }
+        }
+        finally
+        {
+            _restoringFileSelection = false;
+        }
+    }
 
     private void FileSelectionCheckBox_PreviewMouseLeftButtonDown(
         object sender,
