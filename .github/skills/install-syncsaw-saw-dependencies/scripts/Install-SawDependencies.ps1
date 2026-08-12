@@ -3,13 +3,15 @@
 Validates and installs the minimum PowerShell dependencies for Sync-SAW.
 
 .DESCRIPTION
-The installer requires PowerShell 7, inventories registered PSResourceGet and
-PowerShellGet repositories, validates and probes an approved HTTPS repository
-for the tested minimum Az.Accounts and Az.Storage versions, installs missing
-modules for CurrentUser, and verifies every command used by Sync-SAW.ps1.
+PowerShell 7 must first be installed manually from Software Center on the SAW.
+The installer inventories registered PSResourceGet and PowerShellGet
+repositories, validates and probes an approved HTTPS repository for the tested
+minimum Az.Accounts and Az.Storage versions, installs missing modules for
+CurrentUser, and verifies every command used by Sync-SAW.ps1.
 
-It never registers a repository, changes repository trust, installs the full Az
-rollup module, or requests administrator elevation.
+It never installs or upgrades PowerShell, registers a repository, changes
+repository trust, installs the full Az rollup module, or requests administrator
+elevation.
 
 .PARAMETER Repository
 Optional registered repository name. When omitted, the first eligible repository
@@ -32,8 +34,6 @@ The installer does not persist a trust change.
 .EXAMPLE
 .\Install-SawDependencies.ps1 -Repository ContosoPowerShell
 #>
-
-#requires -Version 7.0
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -305,9 +305,14 @@ function Assert-RequiredCommands {
     }
 }
 
-if ($PSVersionTable.PSEdition -ne 'Core') {
+if (
+    $PSVersionTable.PSEdition -ne 'Core' -or
+    $PSVersionTable.PSVersion -lt [version]'7.0'
+) {
     throw [System.PlatformNotSupportedException]::new(
-        'Run this installer with PowerShell 7 (pwsh), not Windows PowerShell.'
+        'PowerShell 7 is required on SAW. Install it manually from Software ' +
+        'Center, then run this installer with pwsh. Do not install PowerShell ' +
+        'from WinGet, an MSI download, or the Microsoft Store.'
     )
 }
 

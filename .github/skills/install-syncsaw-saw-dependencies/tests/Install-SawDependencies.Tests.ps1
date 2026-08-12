@@ -316,4 +316,12 @@ Describe 'Install-SawDependencies' {
         Should -Invoke Install-Module -Times 0 -Exactly
         Should -Invoke Import-Module -Times 0 -Exactly
     }
+
+    It 'directs unsupported hosts to install PowerShell 7 from Software Center' {
+        $scriptContent = Get-Content -LiteralPath $scriptPath -Raw
+
+        $scriptContent | Should -Match 'manually from Software Center'
+        $scriptContent | Should -Match 'Do not install PowerShell'
+        $scriptContent | Should -Not -Match '(?m)^#requires\s+-Version'
+    }
 }

@@ -14,7 +14,7 @@ SyncSAW uses one deterministic merge policy: local files are authoritative for p
 
 - Windows 10 or later
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) to build the GUI
-- [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows) for `scripts\Sync-SAW.ps1`
+- PowerShell 7 for `scripts\Sync-SAW.ps1`; on a SAW, install it manually from **Software Center**
 - [AzCopy v10](https://learn.microsoft.com/azure/storage/common/storage-use-azcopy-v10) for the WPF management application only
 - Azure PowerShell `Az.Accounts` 5.5.0+ and `Az.Storage` 9.4.0+ for the standalone SAW client; use the included dependency installer below
 - [Azure CLI 2.61+](https://learn.microsoft.com/cli/azure/install-azure-cli-windows) for the GUI's Windows broker login
@@ -115,9 +115,14 @@ The GUI never requests or stores account keys, SAS tokens, passwords, or client 
 
 ### Prepare SAW dependencies
 
-Follow [the SAW PowerShell packaging guidance](http://aka.ms/sawpwsh) so an
-approved module repository is registered. Then run the included idempotent
-installer from the extracted release:
+On the SAW, open **Software Center** and manually install PowerShell 7 first.
+The SyncSAW dependency installer does not install or upgrade PowerShell. Do not
+substitute WinGet, an MSI download, or the Microsoft Store on a SAW.
+
+After `pwsh` is available, follow
+[the SAW PowerShell packaging guidance](http://aka.ms/sawpwsh) so an approved
+module repository is registered. Then run the included idempotent installer
+from the extracted release:
 
 ```powershell
 pwsh .\scripts\Install-SawDependencies.ps1
@@ -130,7 +135,7 @@ From a source checkout, the same installer is part of the
 pwsh .\.github\skills\install-syncsaw-saw-dependencies\scripts\Install-SawDependencies.ps1
 ```
 
-The installer requires PowerShell 7, probes the registered HTTPS repository,
+The installer validates PowerShell 7, probes the registered HTTPS repository,
 installs only `Az.Accounts` 5.5.0+ and `Az.Storage` 9.4.0+ at `CurrentUser`
 scope, imports both modules, and verifies every Azure cmdlet used by
 `Sync-SAW.ps1`. It does not install the full `Az` rollup, register repositories,
@@ -247,6 +252,7 @@ The script validates config and command-line inputs, rejects unknown config prop
 | Symptom | Resolution |
 | --- | --- |
 | `AzCopy was not found` | Install it in a standard Program Files location, configure the executable path, set `AZCOPY_PATH`, or add AzCopy to `PATH`. |
+| `pwsh` was not found or PowerShell 7 is required | On the SAW, open **Software Center** and manually install PowerShell 7. Do not use WinGet, an MSI download, or the Microsoft Store. Then reopen a terminal and run `pwsh .\scripts\Install-SawDependencies.ps1`. |
 | `Az.Accounts` or `Az.Storage` module was not found | In PowerShell 7, run `scripts\Install-SawDependencies.ps1`. If no approved repository is registered, follow `http://aka.ms/sawpwsh`; do not automatically register or trust PSGallery. |
 | `403` or authorization failure | Confirm the Blob data role, resource scope, tenant, and RBAC propagation; control-plane Contributor is insufficient. |
 | Entra error `530033` | Remote device flow is blocked by device-based Conditional Access. The SAW script uses Azure PowerShell browser/WAM authentication; the GUI uses **Azure CLI / Windows broker**. If it still fails, use the correlation ID in Entra sign-in logs to identify the applied policy. |
