@@ -30,6 +30,30 @@ Assign the role at the storage account or container scope:
 
 Azure control-plane roles such as Owner or Contributor do not automatically grant Blob data access. RBAC changes can take several minutes to propagate.
 
+### Prepare management server dependencies
+
+On the Windows computer that runs `SyncSAW.App.exe`, use the included
+`install-syncsaw-server-dependencies` agent skill or run its installer directly:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
+  .\.github\skills\install-syncsaw-server-dependencies\scripts\Install-ServerDependencies.ps1
+```
+
+From the extracted release package:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
+  .\scripts\Install-ServerDependencies.ps1
+```
+
+The idempotent installer validates 64-bit Windows and actual installed versions,
+then installs only missing or outdated prerequisites from Microsoft's official
+WinGet HTTPS source using exact package IDs: .NET 8 Desktop Runtime, Azure CLI
+2.61+, and AzCopy v10. WinGet may request elevation for machine-wide packages.
+Use `-WhatIf` for a non-modifying readiness and source check. If WinGet is
+missing, install or repair Microsoft **App Installer** first.
+
 ## Build and test
 
 ```powershell
