@@ -333,7 +333,8 @@ function New-SawStorageContext {
         [Parameter(Mandatory)][string]$AuthMode,
         [AllowNull()][string]$ConfiguredSas,
         [AllowNull()][string]$Tenant,
-        [AllowNull()][string]$Subscription
+        [AllowNull()][string]$Subscription,
+        [switch]$ForceInteractiveLogin
     )
 
     if ($AuthMode -eq 'Sas') {
@@ -349,11 +350,19 @@ function New-SawStorageContext {
     }
 
     [void](Enable-AzContextAutosave -Scope CurrentUser -ErrorAction Stop)
-    $context = Get-AzContext -ErrorAction SilentlyContinue
-    if (-not (Test-SawAzureContext `
+    $context = if ($ForceInteractiveLogin) {
+        $null
+    }
+    else {
+        Get-AzContext -ErrorAction SilentlyContinue
+    }
+    if (
+        -not $ForceInteractiveLogin -and
+        -not (Test-SawAzureContext `
             -Context $context `
             -Tenant $Tenant `
-            -Subscription $Subscription)) {
+            -Subscription $Subscription)
+    ) {
         $context = Get-AzContext -ListAvailable -ErrorAction SilentlyContinue |
             Where-Object {
                 Test-SawAzureContext `
@@ -371,10 +380,13 @@ function New-SawStorageContext {
     }
 
     $cachedCredentialWorks = $false
-    if (Test-SawAzureContext `
+    if (
+        -not $ForceInteractiveLogin -and
+        (Test-SawAzureContext `
             -Context $context `
             -Tenant $Tenant `
-            -Subscription $Subscription) {
+            -Subscription $Subscription)
+    ) {
         try {
             [void](Get-AzAccessToken `
                 -ResourceUrl 'https://storage.azure.com/' `
@@ -400,6 +412,10 @@ function New-SawStorageContext {
         if (-not [string]::IsNullOrWhiteSpace($Subscription)) {
             $loginParameters.Subscription = $Subscription
         }
+        if ($ForceInteractiveLogin) {
+            $loginParameters.Force = $true
+            Write-Host 'The Microsoft Entra credential expired or requires interaction.'
+        }
 
         Write-Host "Opening Microsoft Entra sign-in for tenant $Tenant..."
         [void](Connect-AzAccount @loginParameters)
@@ -410,6 +426,11 @@ function New-SawStorageContext {
                 -ErrorAction Stop)
         }
         $context = Get-AzContext -ErrorAction Stop
+        [void](Get-AzAccessToken `
+            -ResourceUrl 'https://storage.azure.com/' `
+            -TenantId $Tenant `
+            -DefaultProfile $context `
+            -ErrorAction Stop)
     }
 
     if ($context.Tenant.Id.ToString() -ine $Tenant) {
@@ -470,6 +491,24 @@ function Test-SawTransientStorageError {
         'OperationTimedOut|ServerBusy|InternalError|temporar(?:y|ily)|' +
         'timed?\s*out|connection (?:reset|closed|aborted)|' +
         'name resolution|network.*unavailable)'
+    )
+}
+
+function Test-SawAuthenticationError {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$ErrorRecord)
+
+    return (Get-SawErrorText -ErrorRecord $ErrorRecord) -match (
+        '(?i)(?:\b401\b|AuthenticationFailed|AuthenticationRequired|' +
+        'ExpiredAuthenticationToken|InvalidAuthenticationToken|TokenExpired|' +
+        'AADSTS(?:50058|50076|50078|50079|50173|70043|700082|700084)|' +
+        'InteractionRequired|MsalUiRequiredException|interaction_required|' +
+        'user interaction is required|refresh token.{0,80}expired|' +
+        'access token.{0,80}expired|token (?:has )?expired|' +
+        'credentials? (?:has|have) expired|failed to acquire token|' +
+        'could not acquire token|token refresh failed|' +
+        'server failed to authenticate the request|' +
+        'reauthenticat(?:e|ion))'
     )
 }
 
@@ -1330,37 +1369,94 @@ try {
     do {
         Write-Host ''
         Write-Host "Cycle started at $([DateTimeOffset]::Now.ToString('u'))"
-        try {
-            if ([bool]$PauseSync) {
-                Write-Host 'Synchronization is paused by configuration.'
+        $reauthenticatedThisCycle = $false
+        while ($true) {
+            try {
+                if ([bool]$PauseSync) {
+                    Write-Host 'Synchronization is paused by configuration.'
+                }
+                elseif ([bool]$DeletionMode) {
+                    Invoke-DeletionMode `
+                        -Root $resolvedFolder `
+                        -ContainerName $script:NormalizedContainer `
+                        -Context $storageContext
+                }
+                else {
+                    Invoke-NormalSynchronization `
+                        -Root $resolvedFolder `
+                        -ContainerName $script:NormalizedContainer `
+                        -Context $storageContext `
+                        -PublishFlags ([bool]$PublishSyncFlags)
+                }
+                break
             }
-            elseif ([bool]$DeletionMode) {
-                Invoke-DeletionMode `
-                    -Root $resolvedFolder `
-                    -ContainerName $script:NormalizedContainer `
-                    -Context $storageContext
-            }
-            else {
-                Invoke-NormalSynchronization `
-                    -Root $resolvedFolder `
-                    -ContainerName $script:NormalizedContainer `
-                    -Context $storageContext `
-                    -PublishFlags ([bool]$PublishSyncFlags)
-            }
-        }
-        catch [System.Management.Automation.PipelineStoppedException] {
-            throw
-        }
-        catch {
-            $recoverable = (Test-SawNotFoundError -ErrorRecord $_) -or
-                (Test-SawTransientStorageError -ErrorRecord $_)
-            if (-not [bool]$Continuous -or -not $recoverable) {
+            catch [System.Management.Automation.PipelineStoppedException] {
                 throw
             }
-            Write-Warning (
-                "Synchronization cycle encountered a recoverable storage error and " +
-                "will continue: $($_.Exception.Message)"
-            )
+            catch {
+                $authenticationExpired =
+                    $AuthenticationMode -eq 'AzurePowerShell' -and
+                    (Test-SawAuthenticationError -ErrorRecord $_)
+                if (
+                    [bool]$Continuous -and
+                    $authenticationExpired -and
+                    -not $reauthenticatedThisCycle
+                ) {
+                    Write-Warning (
+                        'Microsoft Entra authentication expired. SyncSAW will remain ' +
+                        'running and open sign-in again.'
+                    )
+                    try {
+                        $storageContext = New-SawStorageContext `
+                            -Account $normalizedAccount `
+                            -AuthMode $AuthenticationMode `
+                            -ConfiguredSas $configuredSas `
+                            -Tenant $normalizedTenant `
+                            -Subscription $normalizedSubscription `
+                            -ForceInteractiveLogin
+                        $reauthenticatedThisCycle = $true
+                        Write-Host (
+                            'Microsoft Entra sign-in succeeded. Retrying the current ' +
+                            'synchronization cycle.'
+                        )
+                        continue
+                    }
+                    catch [System.Management.Automation.PipelineStoppedException] {
+                        throw
+                    }
+                    catch {
+                        Write-Warning (
+                            'Microsoft Entra sign-in did not complete. SyncSAW will ' +
+                            "continue running and retry after $IntervalSeconds second(s): " +
+                            $_.Exception.Message
+                        )
+                        break
+                    }
+                }
+                if (
+                    [bool]$Continuous -and
+                    $authenticationExpired -and
+                    $reauthenticatedThisCycle
+                ) {
+                    Write-Warning (
+                        'Authentication still failed after sign-in. SyncSAW will ' +
+                        "continue running and retry after $IntervalSeconds second(s): " +
+                        $_.Exception.Message
+                    )
+                    break
+                }
+
+                $recoverable = (Test-SawNotFoundError -ErrorRecord $_) -or
+                    (Test-SawTransientStorageError -ErrorRecord $_)
+                if (-not [bool]$Continuous -or -not $recoverable) {
+                    throw
+                }
+                Write-Warning (
+                    "Synchronization cycle encountered a recoverable storage error and " +
+                    "will continue: $($_.Exception.Message)"
+                )
+                break
+            }
         }
 
         if ([bool]$Continuous) {
