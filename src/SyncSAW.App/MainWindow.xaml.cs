@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private bool _initialized;
     private bool _isShuttingDown;
     private bool _credentialValid;
+    private bool _deletionQueuedOrRunning;
     private bool _settingsPersistenceWarningShown;
     private DateTimeOffset _nextAutomaticSyncUtc;
 
@@ -353,20 +354,34 @@ public partial class MainWindow : Window
             return;
         }
 
-        await RunExclusiveAsync(
-            $"Deleting {paths.Length:N0} selected " +
-            (paths.Length == 1 ? "file" : "files") + "...",
-            async (current, token) =>
-            {
-                DeleteLocalFiles(localFiles);
-                await _azCopy.DeleteRemoteBatchAsync(current, paths, token);
+        _deletionQueuedOrRunning = true;
+        UpdateFileActionButtons();
+        try
+        {
+            await RunExclusiveAsync(
+                $"Deleting {paths.Length:N0} selected " +
+                (paths.Length == 1 ? "file" : "files") + "...",
+                async (current, token) =>
+                {
+                    DeleteLocalFiles(localFiles);
+                    await _azCopy.DeleteRemoteBatchAsync(current, paths, token);
 
-                await RefreshCoreAsync(current, token);
-                SetStatus(
-                    $"Deleted {paths.Length:N0} " +
-                    (paths.Length == 1 ? "file" : "files") +
-                    " from Azure immediately; SAW cleanup is queued for its next running cycle.");
-            });
+                    await RefreshCoreAsync(current, token);
+                    SetStatus(
+                        $"Deleted {paths.Length:N0} " +
+                        (paths.Length == 1 ? "file" : "files") +
+                        " from Azure immediately; SAW cleanup is queued for its next running cycle.");
+                },
+                queueIfBusy: true,
+                queuedStatus: $"Deletion of {paths.Length:N0} selected " +
+                              (paths.Length == 1 ? "file" : "files") +
+                              " is queued behind the active synchronization.");
+        }
+        finally
+        {
+            _deletionQueuedOrRunning = false;
+            UpdateFileActionButtons();
+        }
     }
 
     private async Task RefreshExclusiveAsync(bool showSkippedMessage)
@@ -427,7 +442,9 @@ public partial class MainWindow : Window
 
     private async Task RunExclusiveAsync(
         string activity,
-        Func<SyncSettings, CancellationToken, Task> operation)
+        Func<SyncSettings, CancellationToken, Task> operation,
+        bool queueIfBusy = false,
+        string? queuedStatus = null)
     {
         CancellationTokenSource? operationCts = null;
         try
@@ -435,20 +452,29 @@ public partial class MainWindow : Window
             await SaveSettingsAsync();
             var settings = CaptureSettings();
             operationCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-            _currentOperationCts = operationCts;
-            var ran = await _scheduler.TryRunAsync(
-                async token =>
+            async Task RunOperationAsync(CancellationToken token)
+            {
+                _currentOperationCts = operationCts;
+                await SetBusyAsync(activity);
+                try
                 {
-                    await SetBusyAsync(activity);
-                    try
-                    {
-                        await operation(settings, token);
-                    }
-                    finally
-                    {
-                        await Dispatcher.InvokeAsync(() => SetBusy(false));
-                    }
-                },
+                    await operation(settings, token);
+                }
+                finally
+                {
+                    await Dispatcher.InvokeAsync(() => SetBusy(false));
+                }
+            }
+
+            if (queueIfBusy)
+            {
+                SetStatus(queuedStatus ?? "Operation queued behind the active synchronization.");
+                await _scheduler.RunAsync(RunOperationAsync, operationCts.Token);
+                return;
+            }
+
+            var ran = await _scheduler.TryRunAsync(
+                RunOperationAsync,
                 operationCts.Token);
 
             if (!ran)
@@ -472,7 +498,6 @@ public partial class MainWindow : Window
                 _currentOperationCts = null;
             }
             operationCts?.Dispose();
-            SetBusy(false);
         }
     }
 
@@ -704,7 +729,10 @@ public partial class MainWindow : Window
         var remoteCount = GetSelectedRemoteItems().Count;
         DownloadRemoteButton.IsEnabled = remoteCount == 1;
         OpenRemoteButton.IsEnabled = remoteCount == 1;
-        DeleteRemoteButton.IsEnabled = remoteCount > 0;
+        DeleteRemoteButton.IsEnabled = remoteCount > 0 && !_deletionQueuedOrRunning;
+        DeleteRemoteButton.ToolTip = _deletionQueuedOrRunning
+            ? "A deletion is queued or running."
+            : "Delete the selected Azure files and queue matching SAW cleanup.";
         DeleteRemoteButton.Content = remoteCount > 1
             ? $"Delete selected ({remoteCount:N0})"
             : "Delete selected";

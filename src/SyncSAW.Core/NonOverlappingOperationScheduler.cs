@@ -24,6 +24,20 @@ public sealed class NonOverlappingOperationScheduler : IDisposable
         }
     }
 
+    public async Task RunAsync(Func<CancellationToken, Task> operation, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await operation(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
