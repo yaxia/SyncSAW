@@ -718,6 +718,12 @@ public partial class MainWindow : Window
 
     private void UpdateFileActionButtons()
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(UpdateFileActionButtons);
+            return;
+        }
+
         var remoteCount = GetSelectedRemoteItems().Count;
         DownloadRemoteButton.IsEnabled = remoteCount == 1;
         OpenRemoteButton.IsEnabled = remoteCount == 1;
@@ -818,6 +824,12 @@ public partial class MainWindow : Window
 
     private void ShowError(Exception exception)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() => ShowError(exception));
+            return;
+        }
+
         if (IsAuthenticationFailure(exception))
         {
             SetConnectionStatus(false);
@@ -850,6 +862,12 @@ public partial class MainWindow : Window
 
     private void ReportBackgroundError(Exception exception)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() => ReportBackgroundError(exception));
+            return;
+        }
+
         if (IsAuthenticationFailure(exception))
         {
             SetConnectionStatus(false);
@@ -865,6 +883,12 @@ public partial class MainWindow : Window
 
     private void MarkPendingItemsFailed(string message)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() => MarkPendingItemsFailed(message));
+            return;
+        }
+
         for (var index = 0; index < _items.Count; index++)
         {
             if (_items[index].State == SyncItemState.Pending)
@@ -886,6 +910,12 @@ public partial class MainWindow : Window
 
     private void SetBusy(bool isBusy)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() => SetBusy(isBusy));
+            return;
+        }
+
         BusyProgressBar.Visibility = isBusy ? Visibility.Visible : Visibility.Collapsed;
         SignInButton.IsEnabled = !isBusy && !_credentialValid;
         CancelButton.Visibility = isBusy && _currentOperationCts is not null
@@ -893,7 +923,16 @@ public partial class MainWindow : Window
             : Visibility.Collapsed;
     }
 
-    private void SetStatus(string message) => StatusTextBlock.Text = message;
+    private void SetStatus(string message)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() => SetStatus(message));
+            return;
+        }
+
+        StatusTextBlock.Text = message;
+    }
 
     private Forms.ContextMenuStrip CreateTrayMenu()
     {
@@ -914,6 +953,12 @@ public partial class MainWindow : Window
 
     private void ShowTrayBalloon(string title, string message)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() => ShowTrayBalloon(title, message));
+            return;
+        }
+
         _trayIcon.BalloonTipTitle = title;
         _trayIcon.BalloonTipText = message.Length > 240 ? message[..240] : message;
         _trayIcon.ShowBalloonTip(3000);
@@ -972,6 +1017,12 @@ public partial class MainWindow : Window
 
     private void SetConnectionStatus(bool isConnected)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() => SetConnectionStatus(isConnected));
+            return;
+        }
+
         _credentialValid = isConnected;
         ConnectionStatusTextBlock.Text = isConnected ? "Azure ready" : "Not signed in";
         SignInButton.Content = isConnected ? "Signed in" : "Sign in";
@@ -1020,6 +1071,13 @@ public partial class MainWindow : Window
 
     private void SetSyncStatusVisual(string backgroundResource, string foregroundResource, string glyph)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() =>
+                SetSyncStatusVisual(backgroundResource, foregroundResource, glyph));
+            return;
+        }
+
         SyncStatusIconBorder.SetResourceReference(
             BackgroundProperty,
             backgroundResource);
