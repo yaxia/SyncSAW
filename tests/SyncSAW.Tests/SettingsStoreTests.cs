@@ -14,7 +14,7 @@ public sealed class SettingsStoreTests
         {
             await File.WriteAllTextAsync(
                 legacyPath,
-                """{"StorageAccount":"account123","Container":"container"}""");
+                """{"StorageAccount":"account123","Container":"container","DeletionMode":true}""");
             File.SetAttributes(legacyPath, FileAttributes.ReadOnly);
             var store = new SettingsStore(currentPath, legacyPath);
 
@@ -23,6 +23,10 @@ public sealed class SettingsStoreTests
             Assert.Equal("account123", settings.StorageAccount);
             Assert.True(File.Exists(currentPath));
             Assert.True(File.Exists(legacyPath));
+            Assert.DoesNotContain(
+                "DeletionMode",
+                await File.ReadAllTextAsync(currentPath),
+                StringComparison.Ordinal);
         }
         finally
         {

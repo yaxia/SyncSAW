@@ -5,8 +5,7 @@ public static class SyncStateComparer
     public static IReadOnlyList<SyncItem> Reconcile(
         IReadOnlyList<LocalFileInfo> localFiles,
         IReadOnlyList<RemoteBlobInfo> remoteBlobs,
-        IReadOnlyList<PlannedTransfer> plan,
-        bool deletionMode = false)
+        IReadOnlyList<PlannedTransfer> plan)
     {
         var local = localFiles.ToDictionary(item => Normalize(item.Path), StringComparer.OrdinalIgnoreCase);
         var remote = remoteBlobs.ToDictionary(item => Normalize(item.Path), StringComparer.OrdinalIgnoreCase);
@@ -50,7 +49,7 @@ public static class SyncStateComparer
                     SyncItemState.LocalOnly,
                     localItem.LastModified,
                     localItem.Size,
-                    deletionMode ? "No action" : "Upload",
+                    "Upload",
                     null,
                     false);
             }
@@ -60,7 +59,7 @@ public static class SyncStateComparer
                 SyncItemState.RemoteOnly,
                 remoteItem?.LastModified,
                 remoteItem?.Size,
-                deletionMode ? "No action" : "Download",
+                "Download",
                 null,
                 remoteItem?.SyncedToSaw ?? false);
         }).ToArray();

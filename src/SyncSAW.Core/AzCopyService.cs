@@ -55,20 +55,14 @@ public sealed class AzCopyService(IAzCopyRunner runner)
         var localFiles = EnumerateLocalFiles(settings.LocalFolder);
         var remoteBlobs = SawSyncFlag.ApplyMarkers(
             AzCopyOutputParser.ParseRemoteList(listResult.StandardOutput));
-        var plan = settings.DeletionMode
-            ? CreateDeletionPlan(localFiles, remoteBlobs)
-            : await CreatePlanAsync(
-                settings,
-                executable,
-                endpoint,
-                localFiles,
-                remoteBlobs,
-                cancellationToken);
-        var items = SyncStateComparer.Reconcile(
+        var plan = await CreatePlanAsync(
+            settings,
+            executable,
+            endpoint,
             localFiles,
             remoteBlobs,
-            plan,
-            settings.DeletionMode);
+            cancellationToken);
+        var items = SyncStateComparer.Reconcile(localFiles, remoteBlobs, plan);
         return new SyncSnapshot(items, remoteBlobs, plan);
     }
 
@@ -82,29 +76,6 @@ public sealed class AzCopyService(IAzCopyRunner runner)
             executable,
             endpoint,
             cancellationToken);
-
-        if (settings.DeletionMode)
-        {
-            var deletionLocalFiles = EnumerateLocalFiles(settings.LocalFolder);
-            var deletionRemoteBlobs = SawSyncFlag.ApplyMarkers(
-                AzCopyOutputParser.ParseRemoteList(listResult.StandardOutput));
-            var deletionPlan = CreateDeletionPlan(deletionLocalFiles, deletionRemoteBlobs);
-            var cloudPaths = deletionPlan
-                .Where(transfer => transfer.Action == "Delete cloud")
-                .Select(transfer => transfer.Path)
-                .ToArray();
-            if (cloudPaths.Length > 0)
-            {
-                await DeleteRemoteBatchAsync(settings, cloudPaths, cancellationToken);
-            }
-
-            foreach (var transfer in deletionPlan.Where(
-                         transfer => transfer.Action == "Delete local"))
-            {
-                File.Delete(ResolveLocalTransferPath(settings.LocalFolder, transfer.Path));
-            }
-            return;
-        }
 
         var uploadPlanResult = await runner.RunAsync(
             executable,
@@ -382,27 +353,6 @@ public sealed class AzCopyService(IAzCopyRunner runner)
                  remote.LastModified is not null &&
                  local.LastModified > remote.LastModified.Value.AddSeconds(2)))
             .Select(local => new PlannedTransfer(local.Path, "Upload (local changed)"));
-    }
-
-    private static IReadOnlyList<PlannedTransfer> CreateDeletionPlan(
-        IReadOnlyList<LocalFileInfo> localFiles,
-        IReadOnlyList<RemoteBlobInfo> remoteBlobs)
-    {
-        var localPaths = localFiles
-            .Select(item => item.Path)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var remotePaths = remoteBlobs
-            .Select(item => item.Path)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        return localPaths
-            .Where(path => !remotePaths.Contains(path))
-            .Select(path => new PlannedTransfer(path, "Delete local"))
-            .Concat(remotePaths
-                .Where(path => !localPaths.Contains(path))
-                .Select(path => new PlannedTransfer(path, "Delete cloud")))
-            .OrderBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
     }
 
     private static bool IsDeletion(PlannedTransfer transfer) =>

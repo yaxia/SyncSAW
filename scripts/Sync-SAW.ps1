@@ -6,9 +6,9 @@ Synchronizes a local SAW folder with an Azure Blob container using Azure PowerSh
 Sync-SAW uses Az.Accounts for Microsoft Entra sign-in and Az.Storage for all Blob
 operations. It does not require a separate transfer executable.
 
-Normal mode uploads local files that are new or changed, then downloads cloud-only
-files without overwriting existing local files. Deletion Mode removes cloud-only
-and local-only files and performs no uploads or downloads.
+The script uploads local files that are new or changed, then downloads cloud-only
+files without overwriting existing local files. Explicit deletion requests from
+the management client remove only confirmed paths.
 
 Settings are loaded from Sync-SAW.config.json beside this script by default.
 Explicit command-line parameters override matching configuration values.
@@ -42,9 +42,6 @@ Keeps a continuous process running without Blob operations.
 Publishes internal markers used by the management application to show which
 current Blob versions have reached SAW.
 
-.PARAMETER DeletionMode
-Deletes files that exist on only one side without uploading or downloading.
-
 .PARAMETER TenantId
 Microsoft Entra tenant used for interactive authentication.
 
@@ -63,11 +60,6 @@ Loads the adjacent JSON configuration and starts the configured job.
 .\Sync-SAW.ps1 -LocalFolder 'D:\SAW' -StorageAccount 'contosodata' -Container 'files' -Continuous
 
 Continuously uploads local changes and downloads cloud-only files.
-
-.EXAMPLE
-.\Sync-SAW.ps1 -LocalFolder 'D:\SAW' -StorageAccount 'contosodata' -Container 'files' -DeletionMode
-
-Deletes cloud-only files from Azure and local-only files from disk.
 
 .NOTES
 Requires PowerShell 7, Az.Accounts, and Az.Storage. No storage account keys,
@@ -106,9 +98,6 @@ param(
 
     [Parameter()]
     [switch]$PublishSyncFlags = $true,
-
-    [Parameter()]
-    [switch]$DeletionMode,
 
     [Parameter()]
     [string]$TenantId = '72f988bf-86f1-41af-91ab-2d7cd011db47',
@@ -170,6 +159,7 @@ function Import-SyncSawConfiguration {
         'Continuous',
         'PauseSync',
         'PublishSyncFlags',
+        # Accepted only to migrate existing configurations that have this set to false.
         'DeletionMode',
         'TenantId',
         'SubscriptionId',
@@ -181,6 +171,19 @@ function Import-SyncSawConfiguration {
                 "Unsupported configuration property '$name'. Allowed properties: $($allowedNames -join ', ')."
             )
         }
+    }
+    if ($configuration.ContainsKey('DeletionMode')) {
+        if ($configuration.DeletionMode -isnot [bool]) {
+            throw [System.IO.InvalidDataException]::new(
+                'DeletionMode in the configuration must be true or false.'
+            )
+        }
+        if ([bool]$configuration.DeletionMode) {
+            throw [System.IO.InvalidDataException]::new(
+                'DeletionMode has been removed. Delete selected files explicitly in the management client.'
+            )
+        }
+        [void]$configuration.Remove('DeletionMode')
     }
 
     return $configuration
@@ -1113,74 +1116,6 @@ function Publish-SawSyncFlags {
     }
 }
 
-function Invoke-DeletionMode {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$ContainerName,
-        [Parameter(Mandatory)][object]$Context
-    )
-
-    $remoteFiles = @(
-        Get-RemoteBlobRecords -ContainerName $ContainerName -Context $Context
-    )
-    $requestedDeletions = Invoke-CloudDeletionRequests `
-        -Root $Root `
-        -RemoteFiles $remoteFiles `
-        -ContainerName $ContainerName `
-        -Context $Context
-    if ($requestedDeletions -gt 0) {
-        $remoteFiles = @(
-            Get-RemoteBlobRecords -ContainerName $ContainerName -Context $Context
-        )
-    }
-
-    $localFiles = @(Get-LocalFileRecords -Root $Root)
-    $localByPath = New-RecordDictionary -Records $localFiles -Property 'RelativePath'
-    $remoteByPath = New-RecordDictionary -Records $remoteFiles -Property 'Name'
-    $cloudDeleted = 0
-    $localDeleted = 0
-
-    foreach ($remote in $remoteFiles) {
-        if (Test-SawInternalBlob -BlobPath $remote.Name) {
-            continue
-        }
-        if ($localByPath.ContainsKey($remote.Name)) {
-            continue
-        }
-
-        Write-Host "Deleting cloud-only file $($remote.Name)"
-        $blobToDelete = $remote.Name
-        [void](Invoke-SawStorageOperation `
-            -Description "Deleting cloud-only Blob '$blobToDelete'" `
-            -IgnoreNotFound `
-            -Operation {
-                Remove-AzStorageBlob `
-                    -Container $ContainerName `
-                    -Blob $blobToDelete `
-                    -Context $Context `
-                    -Force `
-                    -ErrorAction Stop
-            })
-        $cloudDeleted++
-    }
-
-    foreach ($local in $localFiles) {
-        if ($remoteByPath.ContainsKey($local.RelativePath)) {
-            continue
-        }
-
-        Write-Host "Deleting local-only file $($local.RelativePath)"
-        Remove-Item -LiteralPath $local.FullName -Force -ErrorAction Stop
-        $localDeleted++
-    }
-    Write-Host (
-        "Deletion Mode completed: $cloudDeleted cloud-only file(s), " +
-        "$localDeleted local-only file(s), and " +
-        "$requestedDeletions requested deletion(s) applied."
-    )
-}
-
 function Get-SynchronizationMutexName {
     [CmdletBinding()]
     param(
@@ -1266,7 +1201,7 @@ try {
         $IntervalSeconds = $configuredInterval
     }
 
-    foreach ($name in @('Continuous', 'PauseSync', 'PublishSyncFlags', 'DeletionMode')) {
+    foreach ($name in @('Continuous', 'PauseSync', 'PublishSyncFlags')) {
         if (-not $PSBoundParameters.ContainsKey($name) -and $configuration.ContainsKey($name)) {
             if ($configuration[$name] -isnot [bool]) {
                 throw [System.IO.InvalidDataException]::new(
@@ -1374,12 +1309,6 @@ try {
             try {
                 if ([bool]$PauseSync) {
                     Write-Host 'Synchronization is paused by configuration.'
-                }
-                elseif ([bool]$DeletionMode) {
-                    Invoke-DeletionMode `
-                        -Root $resolvedFolder `
-                        -ContainerName $script:NormalizedContainer `
-                        -Context $storageContext
                 }
                 else {
                     Invoke-NormalSynchronization `

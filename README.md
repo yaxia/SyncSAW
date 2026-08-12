@@ -8,7 +8,7 @@ It includes:
 - A standalone PowerShell 7 SAW client for one-shot or continuous synchronization.
 - A testable core library that owns input validation, safe AzCopy argument construction, process execution, output parsing, and concurrency control.
 
-SyncSAW uses one deterministic merge mode: local files are authoritative for paths that exist locally, while cloud-only files download without overwriting local content. A separate confirmed **Deletion Mode** removes files that exist on only one side without uploading or downloading.
+SyncSAW uses one deterministic merge policy: local files are authoritative for paths that exist locally, while cloud-only files download without overwriting local content. Files are deleted only through an explicit selection and destructive-action confirmation in the management application.
 
 ## Prerequisites
 
@@ -85,16 +85,15 @@ The WPF application launches AzCopy directly with `ProcessStartInfo.ArgumentList
 
 1. Choose an existing local folder.
 2. Enter the storage account name (or its standard `*.blob.core.windows.net` host) and container name.
-3. Keep **Sync** mode for normal operation: local changes upload to cloud, and cloud-only files download without overwriting local files. Select **Deletion** only when intentionally removing every file that exists on only one side: cloud-only files are deleted from Azure and local-only files are deleted from this computer. For safety, GUI Deletion Mode is manual-only and disables automatic synchronization.
-4. Open **Advanced settings** to choose **Use Windows setting**, **Light**, or **Dark** appearance. System mode follows Windows changes while the app is running. Windows 11 uses the native Mica backdrop where supported, with a neutral Fluent surface fallback on earlier Windows versions.
-5. Under **Advanced settings**, keep **Azure CLI / Windows broker** selected when the tenant requires a compliant or joined device. The tenant defaults to `72f988bf-86f1-41af-91ab-2d7cd011db47`, limiting account discovery to that tenant. The subscription defaults to `a0d901ba-9956-4f7d-830c-2d7974c36666`; replace it with another subscription ID or clear it to keep Azure CLI's interactive selection.
-6. Select **Sign in** and complete the Windows account prompt. Azure CLI 2.61+ uses WAM on Windows, allowing Conditional Access to evaluate device claims. SyncSAW selects the configured subscription, and AzCopy reuses the brokered token.
-7. Select **Refresh** to list remote blobs and run AzCopy dry-run planning.
-8. Review each file's state, time, size, planned action, and **Synced to SAW** flag. Synchronization runs automatically while the app is open at the selected 5-, 10-, 30-, or 60-second interval. Use the toggle only to pause/resume transfers.
+3. Open **Advanced settings** to choose **Use Windows setting**, **Light**, or **Dark** appearance. System mode follows Windows changes while the app is running. Windows 11 uses the native Mica backdrop where supported, with a neutral Fluent surface fallback on earlier Windows versions.
+4. Under **Advanced settings**, keep **Azure CLI / Windows broker** selected when the tenant requires a compliant or joined device. The tenant defaults to `72f988bf-86f1-41af-91ab-2d7cd011db47`, limiting account discovery to that tenant. The subscription defaults to `a0d901ba-9956-4f7d-830c-2d7974c36666`; replace it with another subscription ID or clear it to keep Azure CLI's interactive selection.
+5. Select **Sign in** and complete the Windows account prompt. Azure CLI 2.61+ uses WAM on Windows, allowing Conditional Access to evaluate device claims. SyncSAW selects the configured subscription, and AzCopy reuses the brokered token.
+6. Select **Refresh** to list remote blobs and run AzCopy dry-run planning.
+7. Review each file's state, time, size, planned action, and **Synced to SAW** flag. Synchronization runs automatically while the app is open at the selected 5-, 10-, 30-, or 60-second interval. Use the toggle only to pause/resume transfers.
 
 The GUI refreshes at the selected interval and synchronizes unless `PauseSync` is enabled in its persisted settings. It uses one shared operation gate, so jobs never overlap. Periodic refreshes are skipped when another job is active; a confirmed **Delete selected** operation instead waits behind the active job and runs as soon as the gate is available. The delete button is disabled while that request is queued or running to prevent duplicate submissions. Use **Cancel** to stop an active login or transfer; SyncSAW terminates the complete child-process tree. Minimizing can keep the app in the notification area, while closing the window always cancels background work and exits.
 
-Remote file controls support upload/update, download, opening a temporary downloaded copy, and delete. Use the **Select** checkboxes or Ctrl/Shift row selection to build an explicit batch; the **Delete selected** button shows its item count. The styled confirmation lists the selected Blobs and warns when matching local files will also be removed. Matching server-local files are removed before the remote batch so automatic synchronization cannot recreate the Blobs. Every durable SAW deletion request is published before any Blob is removed, and deletion is verified against Azure before the view refreshes. The requests tell SAW to remove corresponding local copies and any Blob recreated by an older SAW process, then consume each request. Deletion Mode also requires confirmation. When an AzCopy command fails, planned rows are marked as errors and the original error is shown.
+Remote file controls support upload/update, download, opening a temporary downloaded copy, and delete. Use the **Select** checkboxes or Ctrl/Shift row selection to build an explicit batch; the **Delete selected** button shows its item count. The styled confirmation lists the selected Blobs and warns when matching local files will also be removed. Matching server-local files are removed before the remote batch so automatic synchronization cannot recreate the Blobs. Every durable SAW deletion request is published before any Blob is removed, and deletion is verified against Azure before the view refreshes. The requests tell SAW to remove corresponding local copies and any Blob recreated by an older SAW process, then consume each request. There is no broad deletion mode; only explicitly selected paths are deleted. When an AzCopy command fails, planned rows are marked as errors and the original error is shown.
 
 Every AzCopy child-process invocation, exit code, duration, standard output, and
 standard error is appended to daily local logs:
@@ -149,7 +148,7 @@ repeating parameters:
 pwsh .\scripts\Sync-SAW.ps1
 ```
 
-The JSON file supports `LocalFolder`, `StorageAccount`, `Container`, `DeletionMode`,
+The JSON file supports `LocalFolder`, `StorageAccount`, `Container`,
 `AuthenticationMode`, `SasToken`,
 `IntervalSeconds`, `Continuous`, `PauseSync`, `PublishSyncFlags`, `LogDirectory`, `TenantId`, and
 `SubscriptionId`. `AuthenticationMode` defaults to `AzurePowerShell`. The script
@@ -210,28 +209,25 @@ pwsh .\scripts\Sync-SAW.ps1 `
   -Continuous
 ```
 
-Specify a tenant and explicitly enter Deletion Mode:
+Specify a tenant explicitly:
 
 ```powershell
 pwsh .\scripts\Sync-SAW.ps1 `
   -LocalFolder 'D:\Publish' `
   -StorageAccount 'contosodata' `
   -Container 'releases' `
-  -TenantId '00000000-0000-0000-0000-000000000000' `
-  -DeletionMode
+  -TenantId '00000000-0000-0000-0000-000000000000'
 ```
 
-The script validates config and command-line inputs, rejects unknown config properties, acquires a per-folder/container mutex, signs in through Azure PowerShell by default, performs all transfers with Az.Storage cmdlets, writes a daily transcript beside the script by default (or to `LogDirectory` when configured), publishes SAW status markers, and stops cleanly on Ctrl+C. Storage operations retry transient HTTP/network failures up to four times with exponential backoff. In continuous mode, an exhausted transient failure is logged and retried on the next cycle. If an Entra access or refresh token expires, the script forces a new interactive/WAM sign-in, rebuilds its storage context, and retries the interrupted cycle. Closing or failing that sign-in does not terminate continuous mode; it prompts again after a later cycle. Authorization, invalid configuration, and invalid deletion requests remain fatal. Set `PauseSync` to `true` to keep a continuous client running without transfers. Storage account keys and application secrets are not accepted.
+The script validates config and command-line inputs, rejects unknown config properties, acquires a per-folder/container mutex, signs in through Azure PowerShell by default, performs all transfers with Az.Storage cmdlets, writes a daily transcript beside the script by default (or to `LogDirectory` when configured), publishes SAW status markers, and stops cleanly on Ctrl+C. Storage operations retry transient HTTP/network failures up to four times with exponential backoff. In continuous mode, an exhausted transient failure is logged and retried on the next cycle. If an Entra access or refresh token expires, the script forces a new interactive/WAM sign-in, rebuilds its storage context, and retries the interrupted cycle. Closing or failing that sign-in does not terminate continuous mode; it prompts again after a later cycle. Authorization, invalid configuration, and invalid deletion requests remain fatal. Set `PauseSync` to `true` to keep a continuous client running without transfers. Storage account keys and application secrets are not accepted. For upgrade compatibility, an old config containing `DeletionMode: false` is accepted and ignored; `DeletionMode: true` is rejected with guidance to use explicit management-client deletion.
 
 ## Synchronization semantics
 
 - **WPF Sync mode**: AzCopy dry-run identifies local upload paths, then per-file copy commands guarantee those selected local files are written to cloud. Cloud-only Blobs are downloaded individually to their exact relative local paths with overwrite disabled and Last Modified time preserved. This prevents the container name from becoming a local subdirectory and being uploaded repeatedly.
 - **SAW Sync mode**: local-only files upload as new Blobs. Once a path exists in cloud, cloud is authoritative: any size difference or modified-time difference over two seconds downloads and overwrites the SAW-local file. Downloaded files receive the Blob timestamp, so a stale or locally edited SAW copy cannot revert a server update.
-- **Deletion Mode**: each client deletes cloud-only files from Azure and local-only files from disk. It performs inventory listing and direct deletions only; no AzCopy sync planning, upload, or download occurs.
-- **Manual GUI deletion**: the Blob is removed and verified immediately. A durable deletion request keeps an existing SAW-local copy from recreating it; on the next SAW check, the script deletes that local copy, removes any Blob recreated by an older client, and consumes the request.
+- **Explicit GUI deletion**: only selected and confirmed paths are deleted. The operation waits behind an active sync rather than overlapping or being dropped. Each Blob is removed and verified, and a durable deletion request keeps an existing SAW-local copy from recreating it; on the next SAW check, the script deletes that local copy, removes any Blob recreated by an older client, and consumes the request.
 - Azure Blob deletions are idempotent. A `404`, `BlobNotFound`, or `ContainerNotFound` response means the target is already absent and does not stop the SAW client.
 - Missing containers are created through the active client's transfer provider and verified before synchronization.
-- Deletion Mode is **off by default** and requires confirmation in the GUI. It permanently deletes files present on only one side, including local-only files. Review the configured local folder, account, and container before running it.
 - In the WPF server app, an existing source-local file is authoritative and is never overwritten by cloud download. The server supplements AzCopy planning with size and newer-local-timestamp checks. On SAW, cloud is authoritative for every path that already exists remotely.
 - Folder structure is preserved. Manual upload keeps a path relative to the selected local root; files chosen outside that root upload at the container root.
 - After each successful PowerShell SAW cycle, the script synchronizes sidecar marker blobs under `.syncsaw/saw-flags/`. The marker name is a SHA-256 hash of the case-sensitive blob path. The GUI reports **Synced to SAW: Yes** only when the marker is at least as new as the source blob, so a later cloud update automatically makes the flag stale.
@@ -261,7 +257,6 @@ The script validates config and command-line inputs, rejects unknown config prop
 | GUI Azure CLI login spends a long time discovering directories | Set `TenantId` so `az login` is scoped to one tenant. Set `SubscriptionId` to select the desired account context after login. |
 | SAS authentication returns `403` | Check SAS expiry, HTTPS-only policy, Blob service/resource scope, and permissions. SAW marker publishing needs `rlcwd`; set `PublishSyncFlags` to `false` when using a read-only SAS. |
 | Files remain pending | Run Refresh, inspect the planned action, verify system clocks, and review AzCopy output/error text. |
-| Unexpected deletions are planned | Exit Deletion Mode and review the configured local folder and container. Deletion Mode removes any path that is not present on both sides. |
 | A GUI refresh is skipped | Another synchronization job is still active. SyncSAW intentionally prevents overlap and retries on a later cycle. Confirmed manual deletion is queued instead of skipped. |
 | PowerShell client reports another instance | Stop the other process using the same folder/container, then retry. |
 

@@ -45,19 +45,4 @@ public sealed class SyncStateComparerTests
             new RemoteBlobInfo("file.txt", timestamp.AddSeconds(5), 10)));
     }
 
-    [Fact]
-    public void Reconcile_DeletionModeShowsPlannedLocalAndCloudDeletes()
-    {
-        var result = SyncStateComparer.Reconcile(
-            [new LocalFileInfo("local.txt", DateTimeOffset.UtcNow, 1)],
-            [new RemoteBlobInfo("remote.txt", DateTimeOffset.UtcNow, 1)],
-            [
-                new PlannedTransfer("local.txt", "Delete local"),
-                new PlannedTransfer("remote.txt", "Delete cloud")
-            ],
-            deletionMode: true);
-
-        Assert.Equal("Delete local", result.Single(item => item.Path == "local.txt").Action);
-        Assert.Equal("Delete cloud", result.Single(item => item.Path == "remote.txt").Action);
-    }
 }

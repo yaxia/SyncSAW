@@ -32,7 +32,6 @@ public sealed class SyncSettings
     public string Container { get; set; } = string.Empty;
     public bool PauseSync { get; set; }
     public int AutoSyncIntervalSeconds { get; set; } = 10;
-    public bool DeletionMode { get; set; }
     public bool MinimizeToTray { get; set; } = true;
     public string? AzCopyPath { get; set; }
     public string? AzureCliPath { get; set; }

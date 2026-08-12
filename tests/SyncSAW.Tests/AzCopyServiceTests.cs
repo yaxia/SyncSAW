@@ -310,46 +310,6 @@ public sealed class AzCopyServiceTests
     }
 
     [Fact]
-    public async Task GetSnapshotAsync_DeletionModePlansBothDeletesWithoutSync()
-    {
-        const string listOutput =
-            """{"Items":[{"Path":"cloud-only.txt","ContentLength":3,"LastModifiedTime":"2026-08-10T01:00:00Z"}]}""";
-        var runner = new QueuedRunner(
-            new AzCopyCommandResult(0, listOutput, string.Empty));
-        var service = new AzCopyService(runner);
-        var temporaryDirectory = Directory.CreateTempSubdirectory("SyncSAW.Tests.");
-        try
-        {
-            await File.WriteAllTextAsync(
-                Path.Combine(temporaryDirectory.FullName, "local-only.txt"),
-                "local");
-            var settings = new SyncSettings
-            {
-                LocalFolder = temporaryDirectory.FullName,
-                StorageAccount = "account123",
-                Container = "container",
-                AzCopyPath = CreateFakeAzCopy(temporaryDirectory),
-                LoginMode = EntraLoginMode.DeviceCode,
-                DeletionMode = true
-            };
-
-            var snapshot = await service.GetSnapshotAsync(settings, CancellationToken.None);
-
-            Assert.Equal(["list"], runner.Commands);
-            Assert.Contains(
-                snapshot.Plan,
-                item => item.Path == "local-only.txt" && item.Action == "Delete local");
-            Assert.Contains(
-                snapshot.Plan,
-                item => item.Path == "cloud-only.txt" && item.Action == "Delete cloud");
-        }
-        finally
-        {
-            temporaryDirectory.Delete(recursive: true);
-        }
-    }
-
-    [Fact]
     public async Task SynchronizeAsync_UploadsThenDownloadsOnlyMissingFiles()
     {
         const string uploadPlan =
@@ -434,51 +394,6 @@ public sealed class AzCopyServiceTests
             Assert.Equal(
                 "https://account123.blob.core.windows.net/container/changed.txt",
                 runner.Arguments[2][2]);
-        }
-        finally
-        {
-            temporaryDirectory.Delete(recursive: true);
-        }
-    }
-
-    [Fact]
-    public async Task SynchronizeAsync_DeletionModeDeletesBothSidesWithoutSync()
-    {
-        const string listOutput =
-            """{"Items":[{"Path":"cloud-only.txt","ContentLength":3,"LastModifiedTime":"2026-08-10T01:00:00Z"}]}""";
-        var runner = new QueuedRunner(
-            new AzCopyCommandResult(0, listOutput, string.Empty),
-            new AzCopyCommandResult(0, "{}", string.Empty),
-            new AzCopyCommandResult(0, "{}", string.Empty),
-            new AzCopyCommandResult(0, "{}", string.Empty));
-        var service = new AzCopyService(runner);
-        var temporaryDirectory = Directory.CreateTempSubdirectory("SyncSAW.Tests.");
-        try
-        {
-            var localOnlyPath = Path.Combine(temporaryDirectory.FullName, "local-only.txt");
-            await File.WriteAllTextAsync(localOnlyPath, "local");
-            var settings = new SyncSettings
-            {
-                LocalFolder = temporaryDirectory.FullName,
-                StorageAccount = "account123",
-                Container = "container",
-                AzCopyPath = CreateFakeAzCopy(temporaryDirectory),
-                LoginMode = EntraLoginMode.DeviceCode,
-                DeletionMode = true
-            };
-
-            await service.SynchronizeAsync(settings, CancellationToken.None);
-
-            Assert.Equal(["list", "copy", "remove", "list"], runner.Commands);
-            Assert.False(File.Exists(localOnlyPath));
-            Assert.DoesNotContain(runner.Commands, command => command == "sync");
-            Assert.Contains(
-                SawSyncFlag.DeletionPrefix,
-                runner.Arguments[1][2],
-                StringComparison.Ordinal);
-            Assert.Equal(
-                "https://account123.blob.core.windows.net/container/cloud-only.txt",
-                runner.Arguments[2][1]);
         }
         finally
         {

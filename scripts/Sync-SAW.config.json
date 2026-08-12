@@ -2,7 +2,6 @@
   "LocalFolder": "",
   "StorageAccount": "",
   "Container": "",
-  "DeletionMode": false,
   "AuthenticationMode": "AzurePowerShell",
   "SasToken": "",
   "IntervalSeconds": 10,

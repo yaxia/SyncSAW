@@ -45,7 +45,6 @@ public partial class MainWindow : Window
             $"Operation logs: {OperationLog.DefaultDirectory}";
         FilesDataGrid.ItemsSource = _items;
         UpdateFileActionButtons();
-        SyncModeRadio.IsChecked = true;
         LoginModeComboBox.SelectedIndex = 0;
         ThemeComboBox.SelectedIndex = 0;
         UpdateConfigurationSummary();
@@ -122,9 +121,7 @@ public partial class MainWindow : Window
                         async token =>
                         {
                             var snapshot = await RefreshCoreAsync(settings, token);
-                            if (!settings.PauseSync &&
-                                !settings.DeletionMode &&
-                                snapshot.Plan.Count > 0)
+                            if (!settings.PauseSync && snapshot.Plan.Count > 0)
                             {
                                 await SetBusyAsync("Synchronizing with AzCopy...");
                                 await _azCopy.SynchronizeAsync(settings, token);
@@ -212,33 +209,16 @@ public partial class MainWindow : Window
 
     private async void SyncNow_Click(object sender, RoutedEventArgs e)
     {
-        var settings = CaptureSettings();
-        if (settings.DeletionMode &&
-            !ConfirmationDialog.Show(
-                this,
-                "Confirm Deletion Mode",
-                "Deletion Mode permanently removes cloud-only files and local-only files. It never uploads or downloads files. Continue?",
-                "Run deletion"))
-        {
-            return;
-        }
-
         await RunExclusiveAsync(
-            settings.DeletionMode
-                ? "Deleting files that exist on only one side..."
-                : "Uploading local changes and downloading cloud-only files...",
+            "Uploading local changes and downloading cloud-only files...",
             async (current, token) =>
             {
                 await _azCopy.SynchronizeAsync(current, token);
                 await RefreshCoreAsync(current, token);
-                SetStatus(current.DeletionMode
-                    ? $"Deletion Mode completed at {DateTime.Now:T}."
-                    : $"Synchronization completed at {DateTime.Now:T}.");
+                SetStatus($"Synchronization completed at {DateTime.Now:T}.");
                 ShowTrayBalloon(
-                    current.DeletionMode ? "Deletion complete" : "Synchronization complete",
-                    current.DeletionMode
-                        ? "Cloud-only and local-only files were removed."
-                        : "Local changes were uploaded and cloud-only files were downloaded.");
+                    "Synchronization complete",
+                    "Local changes were uploaded and cloud-only files were downloaded.");
             });
     }
 
@@ -561,28 +541,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void DeletionMode_Checked(object sender, RoutedEventArgs e)
-    {
-        if (!_initialized)
-        {
-            return;
-        }
-
-        if (!ConfirmationDialog.Show(
-                this,
-                "Enable Deletion Mode",
-                "Enable Deletion Mode? SyncSAW will permanently remove every file that exists on only one side: cloud-only files from Azure and local-only files from this computer. No files are uploaded or downloaded.",
-                "Enable deletion"))
-        {
-            SyncModeRadio.IsChecked = true;
-            return;
-        }
-
-        UpdateModeAvailability();
-        UpdateConfigurationSummary();
-        await SaveSettingsAsync();
-    }
-
     private async Task SaveSettingsAsync()
     {
         if (!_initialized)
@@ -627,7 +585,6 @@ public partial class MainWindow : Window
         Container = ContainerTextBox.Text.Trim().ToLowerInvariant(),
         PauseSync = PauseSyncCheckBox.IsChecked == true,
         AutoSyncIntervalSeconds = GetSelectedIntervalSeconds(),
-        DeletionMode = DeletionModeRadio.IsChecked == true,
         MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true,
         AzCopyPath = NullIfWhiteSpace(AzCopyPathTextBox.Text),
         AzureCliPath = NullIfWhiteSpace(AzureCliPathTextBox.Text),
@@ -644,8 +601,6 @@ public partial class MainWindow : Window
         LocalFolderTextBox.Text = settings.LocalFolder;
         StorageAccountTextBox.Text = settings.StorageAccount.ToLowerInvariant();
         ContainerTextBox.Text = settings.Container.ToLowerInvariant();
-        SyncModeRadio.IsChecked = !settings.DeletionMode;
-        DeletionModeRadio.IsChecked = settings.DeletionMode;
         PauseSyncCheckBox.IsChecked = settings.PauseSync;
         SelectAutoSyncInterval(settings.AutoSyncIntervalSeconds);
         MinimizeToTrayCheckBox.IsChecked = settings.MinimizeToTray;
@@ -664,7 +619,6 @@ public partial class MainWindow : Window
             _ => 0
         };
         ThemeManager.Apply(_currentTheme, this);
-        UpdateModeAvailability();
         UpdateConfigurationSummary();
     }
 
@@ -973,30 +927,9 @@ public partial class MainWindow : Window
 
     private void UpdateConfigurationSummary()
     {
-        var deletionMode = DeletionModeRadio.IsChecked == true;
-        UpdateModeAvailability();
-        ModeSummaryTextBlock.Text = deletionMode ? "Deletion" : "Synchronize";
-        ModeDetailTextBlock.Text = deletionMode
-            ? "Delete files present on only one side"
-            : "Upload local · Download cloud-only";
-        AutoSyncDetailTextBlock.Text = deletionMode
-            ? "Manual-only for safety"
-            : PauseSyncCheckBox.IsChecked == true
-                ? "Synchronization paused"
-                : "Running automatically";
-        DeleteStatusTextBlock.Text = deletionMode
-            ? "Deletion Mode is on"
-            : "Deletion Mode is off";
-    }
-
-    private void UpdateModeAvailability()
-    {
-        var automaticSyncAvailable = DeletionModeRadio.IsChecked != true;
-        PauseSyncCheckBox.IsEnabled = automaticSyncAvailable;
-        AutoSyncIntervalComboBox.IsEnabled = automaticSyncAvailable;
-        PauseSyncCheckBox.ToolTip = automaticSyncAvailable
-            ? "Pause automatic synchronization"
-            : "Deletion Mode is manual-only for safety";
+        AutoSyncDetailTextBlock.Text = PauseSyncCheckBox.IsChecked == true
+            ? "Synchronization paused"
+            : "Running automatically";
     }
 
     private void SetConnectionStatus(bool isConnected)

@@ -24,35 +24,6 @@
             <Setter Property="Background" Value="{DynamicResource InfoBackgroundBrush}"/>
         </Style>
 
-        <Style x:Key="SegmentButtonStyle" TargetType="RadioButton">
-            <Setter Property="Height" Value="30"/>
-            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
-            <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="RadioButton">
-                        <Border x:Name="SegmentBorder"
-                                Margin="1"
-                                Background="Transparent"
-                                CornerRadius="4">
-                            <ContentPresenter HorizontalAlignment="Center"
-                                              VerticalAlignment="Center"/>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="SegmentBorder" Property="Background" Value="{DynamicResource HoverBrush}"/>
-                            </Trigger>
-                            <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="SegmentBorder" Property="Background" Value="{DynamicResource CardBrush}"/>
-                                <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
         <Style x:Key="StatusBadgeBorderStyle" TargetType="Border">
             <Setter Property="CornerRadius" Value="11"/>
             <Setter Property="Padding" Value="8,3"/>
@@ -263,17 +234,15 @@
                         <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
                             <TextBlock Foreground="{DynamicResource MutedBrush}"
                                        FontSize="11"
-                                       Text="SYNC MODE"/>
-                            <TextBlock x:Name="ModeSummaryTextBlock"
-                                       Margin="0,3,0,0"
+                                       Text="SYNC POLICY"/>
+                            <TextBlock Margin="0,3,0,0"
                                        FontSize="15"
                                        FontWeight="SemiBold"
-                                       Text="Synchronize"/>
-                            <TextBlock x:Name="ModeDetailTextBlock"
-                                       Margin="0,2,0,0"
+                                       Text="Safe merge"/>
+                            <TextBlock Margin="0,2,0,0"
                                        Foreground="{DynamicResource MutedBrush}"
                                        FontSize="11"
-                                       Text="Upload local · Download cloud-only"/>
+                                       Text="Explicit confirmed deletes only"/>
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -363,8 +332,6 @@
                             <ColumnDefinition Width="1*"/>
                             <ColumnDefinition Width="12"/>
                             <ColumnDefinition Width="1*"/>
-                            <ColumnDefinition Width="12"/>
-                            <ColumnDefinition Width="220"/>
                         </Grid.ColumnDefinitions>
 
                         <StackPanel Grid.Column="0">
@@ -410,38 +377,6 @@
                                      TextChanged="SettingsChanged"/>
                         </StackPanel>
 
-                        <StackPanel Grid.Column="6">
-                            <TextBlock Margin="2,0,0,5"
-                                       Foreground="{DynamicResource MutedBrush}"
-                                       FontSize="11"
-                                       FontWeight="SemiBold"
-                                       Text="Mode"/>
-                            <Border Height="34"
-                                    Padding="1"
-                                    Background="{DynamicResource CardSecondaryBrush}"
-                                    BorderBrush="{DynamicResource BorderBrush}"
-                                    BorderThickness="1"
-                                    CornerRadius="6">
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <RadioButton x:Name="SyncModeRadio"
-                                                 Grid.Column="0"
-                                                 GroupName="SyncMode"
-                                                 Style="{StaticResource SegmentButtonStyle}"
-                                                 Checked="SettingsChanged"
-                                                 Content="⇄  Sync"/>
-                                    <RadioButton x:Name="DeletionModeRadio"
-                                                 Grid.Column="1"
-                                                 GroupName="SyncMode"
-                                                 Style="{StaticResource SegmentButtonStyle}"
-                                                 Checked="DeletionMode_Checked"
-                                                 Content="✕  Deletion"/>
-                                </Grid>
-                            </Border>
-                        </StackPanel>
                     </Grid>
                 </Grid>
             </Border>
@@ -584,12 +519,7 @@
 
                     <Grid Grid.Row="2"
                           Background="{DynamicResource CardSecondaryBrush}">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0"
-                                    Margin="13,0"
+                        <StackPanel Margin="13,0"
                                     Orientation="Horizontal"
                                     VerticalAlignment="Center">
                             <Ellipse Width="6"
@@ -602,13 +532,6 @@
                                        TextTrimming="CharacterEllipsis"
                                        Text="Ready. Configure a local folder and Azure Blob container."/>
                         </StackPanel>
-                        <TextBlock x:Name="DeleteStatusTextBlock"
-                                   Grid.Column="1"
-                                   Margin="0,0,13,0"
-                                   VerticalAlignment="Center"
-                                   Foreground="{DynamicResource MutedBrush}"
-                                   FontSize="11"
-                                   Text="Destination deletion is off"/>
                     </Grid>
                 </Grid>
             </Border>
