@@ -62,11 +62,13 @@ Loads the adjacent JSON configuration and starts the configured job.
 Continuously uploads local changes and downloads cloud-only files.
 
 .NOTES
-Requires PowerShell 7, Az.Accounts, and Az.Storage. No storage account keys,
+The SAW deployment requires PowerShell 7 by policy. The shared implementation
+also remains compatible with Windows PowerShell 5.1 for the cluster Sync.ps1
+entry point. Requires Az.Accounts and Az.Storage. No storage account keys,
 passwords, client secrets, or executable-specific token adapters are used.
 #>
 
-#requires -Version 7.0
+#requires -Version 5.1
 
 [CmdletBinding()]
 param(
@@ -115,6 +117,58 @@ $script:MarkerPrefix = '.syncsaw/saw-flags/'
 $script:DeletionMarkerPrefix = '.syncsaw/deletions/'
 $script:SasTokenForRedaction = $null
 
+function ConvertTo-SyncSawHashtable {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()][object]$InputObject)
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        return @{} + $InputObject
+    }
+    if ($InputObject -isnot [pscustomobject]) {
+        throw [System.IO.InvalidDataException]::new(
+            'Configuration file must contain a JSON object.'
+        )
+    }
+
+    $result = @{}
+    foreach ($property in $InputObject.PSObject.Properties) {
+        $result[$property.Name] = $property.Value
+    }
+    return $result
+}
+
+function Get-SyncSawRelativePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/') +
+        [System.IO.Path]::DirectorySeparatorChar
+    $filePath = [System.IO.Path]::GetFullPath($Path)
+    if (-not $filePath.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw [System.ArgumentException]::new(
+            "Path '$filePath' is outside synchronization root '$rootPath'."
+        )
+    }
+    return $filePath.Substring($rootPath.Length).Replace('\', '/')
+}
+
+function Get-SyncSawSha256Hex {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Value)
+
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $algorithm.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Value))
+        return [System.BitConverter]::ToString($hash).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
 function Import-SyncSawConfiguration {
     [CmdletBinding()]
     param(
@@ -133,8 +187,8 @@ function Import-SyncSawConfiguration {
     }
 
     try {
-        $configuration = Get-Content -LiteralPath $resolvedPath -Raw -Encoding UTF8 |
-            ConvertFrom-Json -AsHashtable
+        $configurationObject = Get-Content -LiteralPath $resolvedPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
     }
     catch {
         throw [System.IO.InvalidDataException]::new(
@@ -142,6 +196,7 @@ function Import-SyncSawConfiguration {
             $_.Exception
         )
     }
+    $configuration = ConvertTo-SyncSawHashtable -InputObject $configurationObject
 
     if ($null -eq $configuration) {
         throw [System.IO.InvalidDataException]::new(
@@ -302,7 +357,7 @@ function Import-LatestModule {
         Select-Object -First 1
     if ($null -eq $module) {
         throw [System.IO.FileNotFoundException]::new(
-            "$Name was not found. In PowerShell 7 run: Install-Module $Name -Scope CurrentUser"
+            "$Name was not found. Run the dependency installer for this client."
         )
     }
     Import-Module -Name $module.Path -Force -ErrorAction Stop
@@ -595,7 +650,7 @@ function Get-LocalFileRecords {
     param([Parameter(Mandatory)][string]$Root)
 
     $records = foreach ($file in Get-ChildItem -LiteralPath $Root -File -Recurse -Force) {
-        $relative = [System.IO.Path]::GetRelativePath($Root, $file.FullName).Replace('\', '/')
+        $relative = Get-SyncSawRelativePath -Root $Root -Path $file.FullName
         if (
             $relative.Equals('.syncsaw', [StringComparison]::OrdinalIgnoreCase) -or
             $relative.StartsWith('.syncsaw/', [StringComparison]::OrdinalIgnoreCase)
@@ -773,11 +828,8 @@ function Get-SawDeletionMarkerPath {
     param([Parameter(Mandatory)][string]$RelativePath)
 
     $normalized = $RelativePath.Replace('\', '/').TrimStart('/')
-    $hash = [System.Security.Cryptography.SHA256]::HashData(
-        [System.Text.Encoding]::UTF8.GetBytes($normalized)
-    )
     return $script:DeletionMarkerPrefix +
-        [System.Convert]::ToHexString($hash).ToLowerInvariant() +
+        (Get-SyncSawSha256Hex -Value $normalized) +
         '.delete'
 }
 
@@ -1029,11 +1081,8 @@ function Get-SawMarkerPath {
     param([Parameter(Mandatory)][string]$RelativePath)
 
     $normalized = $RelativePath.Replace('\', '/').TrimStart('/')
-    $hash = [System.Security.Cryptography.SHA256]::HashData(
-        [System.Text.Encoding]::UTF8.GetBytes($normalized)
-    )
     return $script:MarkerPrefix +
-        [System.Convert]::ToHexString($hash).ToLowerInvariant() +
+        (Get-SyncSawSha256Hex -Value $normalized) +
         '.flag'
 }
 
@@ -1165,10 +1214,8 @@ function Get-SynchronizationMutexName {
     )
 
     $identity = "$($Folder.ToLowerInvariant())|$Account|$ContainerName"
-    $hash = [System.Security.Cryptography.SHA256]::HashData(
-        [System.Text.Encoding]::UTF8.GetBytes($identity)
-    )
-    return 'Local\SyncSAW_' + [System.Convert]::ToHexString($hash).Substring(0, 32)
+    return 'Local\SyncSAW_' +
+        (Get-SyncSawSha256Hex -Value $identity).Substring(0, 32).ToUpperInvariant()
 }
 
 function Protect-SawTranscript {
@@ -1301,7 +1348,14 @@ try {
     $transcriptPath = Join-Path `
         $resolvedLogDirectory `
         "sync-saw-$([DateTimeOffset]::Now.ToString('yyyyMMdd')).log"
-    [void](Start-Transcript -LiteralPath $transcriptPath -Append -UseMinimalHeader)
+    $transcriptParameters = @{
+        LiteralPath = $transcriptPath
+        Append      = $true
+    }
+    if ((Get-Command Start-Transcript).Parameters.ContainsKey('UseMinimalHeader')) {
+        $transcriptParameters.UseMinimalHeader = $true
+    }
+    [void](Start-Transcript @transcriptParameters)
     $transcriptStarted = $true
 
     $mutexName = Get-SynchronizationMutexName `

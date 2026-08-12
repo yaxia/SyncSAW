@@ -12,6 +12,7 @@ Describe 'Sync-SAW cloud update detection' {
         }
 
         foreach ($functionName in @(
+            'Get-SyncSawSha256Hex',
             'New-RecordDictionary',
             'Test-RemoteDownloadRequired',
             'Get-SawMarkerPath',

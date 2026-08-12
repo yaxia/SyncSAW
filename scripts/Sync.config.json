@@ -1,0 +1,14 @@
+{
+  "LocalFolder": "",
+  "StorageAccount": "",
+  "Container": "",
+  "AuthenticationMode": "AzurePowerShell",
+  "SasToken": "",
+  "IntervalSeconds": 10,
+  "Continuous": true,
+  "PauseSync": false,
+  "PublishSyncFlags": true,
+  "LogDirectory": "",
+  "TenantId": "72f988bf-86f1-41af-91ab-2d7cd011db47",
+  "SubscriptionId": "a0d901ba-9956-4f7d-830c-2d7974c36666"
+}

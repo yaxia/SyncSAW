@@ -11,18 +11,23 @@ Describe 'Sync-SAW configuration compatibility' {
             throw 'Sync-SAW.ps1 could not be parsed for tests.'
         }
 
-        $definition = $script:syncSawConfigurationAst.FindAll({
-            param($node)
-            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Import-SyncSawConfiguration'
-        }, $true) | Select-Object -First 1
-        if ($null -eq $definition) {
-            throw "Function 'Import-SyncSawConfiguration' was not found in Sync-SAW.ps1."
-        }
+        foreach ($functionName in @(
+            'ConvertTo-SyncSawHashtable',
+            'Import-SyncSawConfiguration'
+        )) {
+            $definition = $script:syncSawConfigurationAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $functionName
+            }, $true) | Select-Object -First 1
+            if ($null -eq $definition) {
+                throw "Function '$functionName' was not found in Sync-SAW.ps1."
+            }
 
-        $bodyText = $definition.Body.Extent.Text
-        $body = [scriptblock]::Create($bodyText.Substring(1, $bodyText.Length - 2))
-        Set-Item -Path 'Function:\Import-SyncSawConfiguration' -Value $body
+            $bodyText = $definition.Body.Extent.Text
+            $body = [scriptblock]::Create($bodyText.Substring(1, $bodyText.Length - 2))
+            Set-Item -Path "Function:\$functionName" -Value $body
+        }
     }
 
     It 'does not expose the removed DeletionMode command-line parameter' {
@@ -51,5 +56,14 @@ Describe 'Sync-SAW configuration compatibility' {
         {
             Import-SyncSawConfiguration -Path $path -PathWasExplicit $true
         } | Should -Throw '*DeletionMode has been removed*'
+    }
+
+    It 'rejects a JSON value that is not a configuration object' {
+        $path = Join-Path $TestDrive 'array.json'
+        Set-Content -LiteralPath $path -Value '[]'
+
+        {
+            Import-SyncSawConfiguration -Path $path -PathWasExplicit $true
+        } | Should -Throw '*must contain a JSON object*'
     }
 }
