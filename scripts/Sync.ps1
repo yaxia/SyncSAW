@@ -1,22 +1,22 @@
 <#
 .SYNOPSIS
-Runs the SyncSAW Azure Blob synchronization client on cluster machines.
+Runs SyncSAW on a machine where PowerShell 7 cannot be installed.
 
 .DESCRIPTION
-Sync.ps1 is the Windows PowerShell 5.1 cluster entry point for the same
-synchronization implementation used by Sync-SAW.ps1. It uses Az.Accounts and
-Az.Storage, supports adjacent JSON configuration, prevents overlapping jobs,
-and keeps the same upload, download, deletion-request, marker, and
-reauthentication semantics.
+Sync.ps1 is the Windows PowerShell 5.1 fallback entry point for the same
+synchronization implementation used by Sync-SAW.ps1. Use it only when
+PowerShell 7 cannot be installed. It uses Az.Accounts and Az.Storage, supports
+adjacent JSON configuration, prevents overlapping jobs, and keeps the same
+upload, download, deletion-request, marker, and reauthentication semantics.
 
-Run Install-ClusterDependencies.ps1 once as the same Windows user before
-starting this script.
+Run Install-WindowsPowerShellDependencies.ps1 once as the same Windows user
+before starting this script.
 
 .EXAMPLE
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File .\Sync.ps1
 
 .EXAMPLE
-.\Sync.ps1 -LocalFolder 'D:\ClusterData' -StorageAccount 'contosodata' -Container 'files' -Continuous
+.\Sync.ps1 -LocalFolder 'D:\SyncData' -StorageAccount 'contosodata' -Container 'files' -Continuous
 #>
 
 #requires -Version 5.1

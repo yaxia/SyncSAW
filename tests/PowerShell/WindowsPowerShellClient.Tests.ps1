@@ -1,12 +1,12 @@
-Describe 'Windows PowerShell cluster client compatibility' {
+Describe 'Windows PowerShell 5.1 fallback compatibility' {
     BeforeAll {
         $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
         $implementationPath = Join-Path $repoRoot 'scripts\Sync-SAW.ps1'
-        $clusterPath = Join-Path $repoRoot 'scripts\Sync.ps1'
-        $installerPath = Join-Path $repoRoot 'scripts\Install-ClusterDependencies.ps1'
+        $fallbackPath = Join-Path $repoRoot 'scripts\Sync.ps1'
+        $installerPath = Join-Path $repoRoot 'scripts\Install-WindowsPowerShellDependencies.ps1'
     }
 
-    It 'parses every cluster script with Windows PowerShell 5.1' {
+    It 'parses every fallback script with Windows PowerShell 5.1' {
         $parserPath = Join-Path $TestDrive 'Test-Parse.ps1'
         @'
 param([Parameter(Mandatory)][string]$RepoRoot)
@@ -15,7 +15,7 @@ $failed = $false
 foreach ($relativePath in @(
     'scripts\Sync-SAW.ps1',
     'scripts\Sync.ps1',
-    'scripts\Install-ClusterDependencies.ps1'
+    'scripts\Install-WindowsPowerShellDependencies.ps1'
 )) {
     $path = Join-Path $RepoRoot $relativePath
     $tokens = $null
@@ -50,18 +50,18 @@ if ($failed) { exit 1 }
         $process.ExitCode | Should -Be 0
     }
 
-    It 'keeps the cluster entry point parameter-compatible with the shared implementation' {
-        $clusterCommand = Get-Command $clusterPath
+    It 'keeps the fallback entry point parameter-compatible with the shared implementation' {
+        $fallbackCommand = Get-Command $fallbackPath
         $implementationCommand = Get-Command $implementationPath
         $commonParameters = [System.Management.Automation.PSCmdlet]::CommonParameters
-        $clusterParameters = @($clusterCommand.Parameters.Keys | Where-Object {
+        $fallbackParameters = @($fallbackCommand.Parameters.Keys | Where-Object {
             $_ -notin $commonParameters
         } | Sort-Object)
         $implementationParameters = @($implementationCommand.Parameters.Keys | Where-Object {
             $_ -notin $commonParameters
         } | Sort-Object)
 
-        $clusterParameters | Should -Be $implementationParameters
+        $fallbackParameters | Should -Be $implementationParameters
     }
 
     It 'avoids PowerShell 7-only runtime APIs in the shared implementation' {
@@ -75,13 +75,13 @@ if ($failed) { exit 1 }
     }
 
     It 'runs a paused configured cycle successfully in Windows PowerShell 5.1' {
-        $localFolder = Join-Path $TestDrive 'cluster-data'
+        $localFolder = Join-Path $TestDrive 'fallback-data'
         $logFolder = Join-Path $TestDrive 'logs'
         [void](New-Item -ItemType Directory -Path $localFolder, $logFolder -Force)
         $configuration = @{
             LocalFolder       = $localFolder
-            StorageAccount    = 'clusterstorage'
-            Container         = 'cluster-files'
+            StorageAccount    = 'fallbackstorage'
+            Container         = 'fallback-files'
             AuthenticationMode = 'AzurePowerShell'
             IntervalSeconds   = 10
             Continuous        = $false
@@ -103,7 +103,7 @@ if ($failed) { exit 1 }
                 '-ExecutionPolicy',
                 'Bypass',
                 '-File',
-                $clusterPath,
+                $fallbackPath,
                 '-ConfigPath',
                 $configPath
             ) `

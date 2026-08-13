@@ -62,10 +62,11 @@ Loads the adjacent JSON configuration and starts the configured job.
 Continuously uploads local changes and downloads cloud-only files.
 
 .NOTES
-The SAW deployment requires PowerShell 7 by policy. The shared implementation
-also remains compatible with Windows PowerShell 5.1 for the cluster Sync.ps1
-entry point. Requires Az.Accounts and Az.Storage. No storage account keys,
-passwords, client secrets, or executable-specific token adapters are used.
+The SAW deployment requires PowerShell 7 by policy. For machines where
+PowerShell 7 cannot be installed, the shared implementation remains compatible
+with the Windows PowerShell 5.1 Sync.ps1 entry point. Requires Az.Accounts and
+Az.Storage. No storage account keys, passwords, client secrets, or
+executable-specific token adapters are used.
 #>
 
 #requires -Version 5.1
@@ -613,8 +614,35 @@ function Initialize-BlobContainer {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][object]$Context
+        [Parameter(Mandatory)][object]$Context,
+        [Parameter(Mandatory)][ValidateSet('AzurePowerShell', 'Sas')]
+        [string]$AuthenticationMode
     )
+
+    if ($AuthenticationMode -eq 'Sas') {
+        try {
+            [void](Invoke-SawStorageOperation `
+                -Description "Checking Blob container '$Name' with SAS" `
+                -Operation {
+                    Get-AzStorageBlob `
+                        -Container $Name `
+                        -Context $Context `
+                        -MaxCount 1 `
+                        -ErrorAction Stop
+                })
+            return
+        }
+        catch {
+            if (Test-SawNotFoundError -ErrorRecord $_) {
+                throw [System.InvalidOperationException]::new(
+                    "Blob container '$Name' does not exist. A container-scoped " +
+                    'SAS cannot create its target container.',
+                    $_.Exception
+                )
+            }
+            throw
+        }
+    }
 
     try {
         [void](Invoke-SawStorageOperation `
@@ -1387,7 +1415,8 @@ try {
             -Subscription $normalizedSubscription
         Initialize-BlobContainer `
             -Name $script:NormalizedContainer `
-            -Context $storageContext
+            -Context $storageContext `
+            -AuthenticationMode $AuthenticationMode
     }
 
     Write-Host "Local folder: $resolvedFolder"

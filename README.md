@@ -15,7 +15,7 @@ SyncSAW uses one deterministic merge policy: local files are authoritative for p
 - Windows 10 or later
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) to build the GUI
 - PowerShell 7 for `scripts\Sync-SAW.ps1`; on a SAW, install it manually from **Software Center**
-- 64-bit Windows PowerShell 5.1 for the optional cluster `scripts\Sync.ps1` client
+- 64-bit Windows PowerShell 5.1 for the optional `scripts\Sync.ps1` fallback on machines where PowerShell 7 cannot be installed
 - [AzCopy v10](https://learn.microsoft.com/azure/storage/common/storage-use-azcopy-v10) for the WPF management application only
 - Azure PowerShell `Az.Accounts` 5.5.0+ and `Az.Storage` 9.4.0+ for the standalone SAW client; use the included dependency installer below
 - [Azure CLI 2.61+](https://learn.microsoft.com/cli/azure/install-azure-cli-windows) for the GUI's Windows broker login
@@ -189,6 +189,9 @@ creates current marker blobs and removes stale ones. Set `PublishSyncFlags` to
 missing container generally requires an account SAS with Blob service,
 container resource type, and create permission. A container SAS that cannot
 create its target will fail with an Azure Storage authorization error.
+For an existing container, SyncSAW validates a container-scoped SAS by listing
+Blobs within that container; it does not require account-level container-list
+permission.
 Explicit command-line parameters override matching config values, and another
 file can be selected with `-ConfigPath`.
 
@@ -227,22 +230,20 @@ pwsh .\scripts\Sync-SAW.ps1 `
 
 The script validates config and command-line inputs, rejects unknown config properties, acquires a per-folder/container mutex, signs in through Azure PowerShell by default, performs all transfers with Az.Storage cmdlets, writes a daily transcript beside the script by default (or to `LogDirectory` when configured), publishes SAW status markers, and stops cleanly on Ctrl+C. Storage operations retry transient HTTP/network failures up to four times with exponential backoff. In continuous mode, an exhausted transient failure is logged and retried on the next cycle. If an Entra access or refresh token expires, the script forces a new interactive/WAM sign-in, rebuilds its storage context, and retries the interrupted cycle. Closing or failing that sign-in does not terminate continuous mode; it prompts again after a later cycle. Authorization, invalid configuration, and invalid deletion requests remain fatal. Set `PauseSync` to `true` to keep a continuous client running without transfers. Storage account keys and application secrets are not accepted. For upgrade compatibility, an old config containing `DeletionMode: false` is accepted and ignored; `DeletionMode: true` is rejected with guidance to use explicit management-client deletion.
 
-## Windows PowerShell 5.1 cluster client
+## Windows PowerShell 5.1 fallback
 
-Cluster machines that cannot use PowerShell 7 can run `scripts\Sync.ps1` with
-64-bit Windows PowerShell 5.1. `Sync.ps1` delegates to the same synchronization
-implementation as `Sync-SAW.ps1`, so upload/download authority, explicit
-deletion requests, cloud-update detection, sync markers, non-overlap protection,
-continuous polling, and authentication recovery remain identical.
-Keep `Sync.ps1`, `Sync-SAW.ps1`, and `Sync.config.json` together in the same
-directory when copying the cluster client.
+Use `scripts\Sync.ps1` only on machines where PowerShell 7 cannot be installed.
+It runs under 64-bit Windows PowerShell 5.1 and delegates to the same
+synchronization implementation as `Sync-SAW.ps1`, so synchronization and
+security behavior remain identical. Keep `Sync.ps1`, `Sync-SAW.ps1`, and
+`Sync.config.json` together in the same directory.
 
-Install the cluster dependencies once as the same Windows user that will run
-the synchronization job:
+Install the Windows PowerShell dependencies once as the same Windows user that
+will run the synchronization job:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
-  .\scripts\Install-ClusterDependencies.ps1
+  .\scripts\Install-WindowsPowerShellDependencies.ps1
 ```
 
 The installer validates a 64-bit Windows PowerShell 5.1 Desktop host, enables
@@ -262,7 +263,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
   .\scripts\Sync.ps1
 ```
 
-The cluster config has the same fields and override rules as
+The fallback config has the same fields and override rules as
 `Sync-SAW.config.json`. Command-line parameters can also be passed directly to
 `Sync.ps1`. Interactive Microsoft Entra sign-in and cached CurrentUser contexts
 are supported. A non-interactive scheduled task must run as the same Windows
@@ -297,7 +298,7 @@ account keys are supported.
 | --- | --- |
 | `AzCopy was not found` | Install it in a standard Program Files location, configure the executable path, set `AZCOPY_PATH`, or add AzCopy to `PATH`. |
 | `pwsh` was not found or PowerShell 7 is required | On the SAW, open **Software Center** and manually install PowerShell 7. Do not use WinGet, an MSI download, or the Microsoft Store. Then reopen a terminal and run `pwsh .\scripts\Install-SawDependencies.ps1`. |
-| Cluster `Sync.ps1` reports missing Azure modules | Run `scripts\Install-ClusterDependencies.ps1` from 64-bit Windows PowerShell 5.1 as the same user that runs the sync job. |
+| Windows PowerShell 5.1 `Sync.ps1` reports missing Azure modules | If PowerShell 7 cannot be installed, run `scripts\Install-WindowsPowerShellDependencies.ps1` from 64-bit Windows PowerShell 5.1 as the same user that runs the sync job. |
 | `Az.Accounts` or `Az.Storage` module was not found | In PowerShell 7, run `scripts\Install-SawDependencies.ps1`. If no approved repository is registered, follow `http://aka.ms/sawpwsh`; do not automatically register or trust PSGallery. |
 | `403` or authorization failure | Confirm the Blob data role, resource scope, tenant, and RBAC propagation; control-plane Contributor is insufficient. |
 | Entra error `530033` | Remote device flow is blocked by device-based Conditional Access. The SAW script uses Azure PowerShell browser/WAM authentication; the GUI uses **Azure CLI / Windows broker**. If it still fails, use the correlation ID in Entra sign-in logs to identify the applied policy. |

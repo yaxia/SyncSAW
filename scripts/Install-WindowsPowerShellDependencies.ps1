@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-Installs the minimum SyncSAW dependencies for Windows PowerShell 5.1 clusters.
+Installs SyncSAW dependencies for the Windows PowerShell 5.1 fallback.
 
 .DESCRIPTION
-Validates 64-bit Windows PowerShell 5.1, an HTTPS PowerShellGet repository, and
-the tested Az.Accounts and Az.Storage versions. Missing modules are installed
-for CurrentUser, imported, and checked for every command and parameter used by
-Sync.ps1.
+For machines where PowerShell 7 cannot be installed, validates 64-bit Windows
+PowerShell 5.1, an HTTPS PowerShellGet repository, and the tested Az.Accounts
+and Az.Storage versions. Missing modules are installed for CurrentUser,
+imported, and checked for every command and parameter used by Sync.ps1.
 
 The installer does not install PowerShell, persist repository trust changes,
 install the full Az rollup module, or store Azure credentials.
@@ -20,10 +20,10 @@ Untrusted. PSGallery is accepted only when it resolves to the official HTTPS
 PowerShell Gallery endpoint.
 
 .EXAMPLE
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File .\Install-ClusterDependencies.ps1
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File .\Install-WindowsPowerShellDependencies.ps1
 
 .EXAMPLE
-.\Install-ClusterDependencies.ps1 -Repository ContosoPowerShell -AllowUntrustedRepository
+.\Install-WindowsPowerShellDependencies.ps1 -Repository ContosoPowerShell -AllowUntrustedRepository
 #>
 
 #requires -Version 5.1
@@ -49,7 +49,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Get-LatestInstalledClusterModule {
+function Get-LatestInstalledWindowsPowerShellModule {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Name)
 
@@ -66,7 +66,7 @@ function Get-LatestInstalledClusterModule {
         Select-Object -First 1
 }
 
-function Assert-ClusterCommands {
+function Assert-WindowsPowerShellCommands {
     [CmdletBinding()]
     param()
 
@@ -106,7 +106,7 @@ function Assert-ClusterCommands {
 
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
     throw [System.PlatformNotSupportedException]::new(
-        'Run this cluster installer with 64-bit Windows PowerShell 5.1 (powershell.exe).'
+        'Run this fallback installer with 64-bit Windows PowerShell 5.1 (powershell.exe).'
     )
 }
 if (-not [Environment]::Is64BitProcess) {
@@ -120,7 +120,7 @@ $findModuleCommand = Get-Command Find-Module -ErrorAction SilentlyContinue
 if ($null -eq $installModuleCommand -or $null -eq $findModuleCommand) {
     throw [System.IO.FileNotFoundException]::new(
         'PowerShellGet is required. Repair or update Windows Management Framework ' +
-        'before running the cluster dependency installer.'
+        'before running the Windows PowerShell dependency installer.'
     )
 }
 
@@ -193,7 +193,7 @@ try {
     }
 
     foreach ($requirement in $requirements.GetEnumerator()) {
-        $installed = Get-LatestInstalledClusterModule -Name $requirement.Key
+        $installed = Get-LatestInstalledWindowsPowerShellModule -Name $requirement.Key
         if ($null -ne $installed -and [version]$installed.Version -ge $requirement.Value) {
             Write-Host "$($requirement.Key) $($installed.Version) already satisfies the requirement."
             continue
@@ -225,7 +225,7 @@ try {
 
     $results = foreach ($requirement in $requirements.GetEnumerator()) {
         Remove-Module -Name $requirement.Key -Force -ErrorAction SilentlyContinue
-        $installed = Get-LatestInstalledClusterModule -Name $requirement.Key
+        $installed = Get-LatestInstalledWindowsPowerShellModule -Name $requirement.Key
         if ($null -eq $installed -or [version]$installed.Version -lt $requirement.Value) {
             throw [System.InvalidOperationException]::new(
                 "$($requirement.Key) did not meet version $($requirement.Value) after installation."
@@ -239,9 +239,9 @@ try {
         }
     }
 
-    Assert-ClusterCommands
+    Assert-WindowsPowerShellCommands
     Write-Host ''
-    Write-Host 'SyncSAW cluster dependency readiness: PASS' -ForegroundColor Green
+    Write-Host 'SyncSAW Windows PowerShell 5.1 dependency readiness: PASS' -ForegroundColor Green
     $results | Format-Table Module, Version, Path -AutoSize | Out-Host
     Write-Host 'Review Sync.config.json, then run Sync.ps1 with Windows PowerShell 5.1.'
 }
