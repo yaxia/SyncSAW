@@ -37,6 +37,7 @@ public partial class MainWindow : Window
     private bool _settingsPersistenceWarningShown;
     private DateTimeOffset _nextAutomaticSyncUtc;
     private DateTimeOffset _nextClusterPackagePublishUtc = DateTimeOffset.MinValue;
+    private int _clusterPackageConfigurationVersion;
 
     public MainWindow()
     {
@@ -131,6 +132,16 @@ public partial class MainWindow : Window
                                 await _azCopy.SynchronizeAsync(settings, token);
                                 await RefreshCoreAsync(settings, token);
                             }
+                            var publication = await PublishClusterPackageIfDueAsync(
+                                settings,
+                                token);
+                            if (publication is not null)
+                            {
+                                SetStatus(
+                                    $"Published {ClusterPackage.BlobName} with " +
+                                    $"{publication.PayloadFileCount:N0} payload files; SAS expires " +
+                                    $"{publication.SasExpiresUtc.ToLocalTime():g}.");
+                            }
                         },
                         cancellationToken);
                 }
@@ -219,7 +230,11 @@ public partial class MainWindow : Window
             {
                 await _azCopy.SynchronizeAsync(current, token);
                 await RefreshCoreAsync(current, token);
-                SetStatus($"Synchronization completed at {DateTime.Now:T}.");
+                var publication = await PublishClusterPackageIfDueAsync(current, token);
+                SetStatus(publication is null
+                    ? $"Synchronization completed at {DateTime.Now:T}."
+                    : $"Synchronization completed and {ClusterPackage.BlobName} was published " +
+                      $"with {publication.PayloadFileCount:N0} payload files.");
                 ShowTrayBalloon(
                     "Synchronization complete",
                     "Local changes were uploaded and cloud-only files were downloaded.");
@@ -387,9 +402,6 @@ public partial class MainWindow : Window
         try
         {
             var snapshot = await _azCopy.GetSnapshotAsync(settings, cancellationToken);
-            var clusterPublication = await PublishClusterPackageIfDueAsync(
-                settings,
-                cancellationToken);
             await Dispatcher.InvokeAsync(() =>
             {
                 ReplaceFileItemsPreservingSelection(snapshot.Items);
@@ -411,12 +423,9 @@ public partial class MainWindow : Window
                     $"{snapshot.RemoteBlobs.Count:N0} remote blobs • checked {DateTime.Now:t}";
                 SetSyncStatusVisual("SuccessBackgroundBrush", "SuccessBrush", "\uE73E");
                 SetConnectionStatus(true);
-                SetStatus(clusterPublication is null
-                    ? $"Updated {DateTime.Now:T} • {snapshot.RemoteBlobs.Count:N0} remote blobs • " +
-                      $"{snapshot.Plan.Count:N0} planned actions"
-                    : $"Published {ClusterPackage.BlobName} with " +
-                      $"{clusterPublication.PayloadFileCount:N0} payload files; " +
-                      $"SAS expires {clusterPublication.SasExpiresUtc.ToLocalTime():g}.");
+                SetStatus(
+                    $"Updated {DateTime.Now:T} • {snapshot.RemoteBlobs.Count:N0} remote blobs • " +
+                    $"{snapshot.Plan.Count:N0} planned actions");
             });
             return snapshot;
         }
@@ -437,6 +446,7 @@ public partial class MainWindow : Window
         }
 
         var now = DateTimeOffset.UtcNow;
+        var configurationVersion = Volatile.Read(ref _clusterPackageConfigurationVersion);
         if (now < _nextClusterPackagePublishUtc)
         {
             return null;
@@ -448,16 +458,22 @@ public partial class MainWindow : Window
                 settings,
                 now,
                 cancellationToken);
-            _nextClusterPackagePublishUtc = now.Add(ClusterPackage.PublishInterval);
+            if (configurationVersion == Volatile.Read(ref _clusterPackageConfigurationVersion))
+            {
+                _nextClusterPackagePublishUtc = now.Add(ClusterPackage.PublishInterval);
+            }
             await _operationLog.WriteEventAsync(
                 $"Published {ClusterPackage.BlobName} with " +
-                $"{publication.PayloadFileCount} payload files; read SAS expires " +
+                $"{publication.PayloadFileCount} payload files; embedded SAS values expire " +
                 $"{publication.SasExpiresUtc:O}.");
             return publication;
         }
         catch
         {
-            _nextClusterPackagePublishUtc = now.AddMinutes(10);
+            if (configurationVersion == Volatile.Read(ref _clusterPackageConfigurationVersion))
+            {
+                _nextClusterPackagePublishUtc = now.AddMinutes(10);
+            }
             throw;
         }
     }
@@ -553,6 +569,7 @@ public partial class MainWindow : Window
             ReferenceEquals(sender, ContainerTextBox))
         {
             _nextClusterPackagePublishUtc = DateTimeOffset.MinValue;
+            Interlocked.Increment(ref _clusterPackageConfigurationVersion);
         }
 
         if (_initialized)

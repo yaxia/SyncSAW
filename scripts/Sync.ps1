@@ -141,17 +141,17 @@ function Get-SasQueryValues {
         if ([string]::IsNullOrWhiteSpace($part)) {
             continue
         }
-        $pair = $part.Split(@('='), 2)
-        if ($pair.Count -eq 2) {
-            $name = [uri]::UnescapeDataString($pair[0])
-            $value = [uri]::UnescapeDataString($pair[1])
+        $separator = $part.IndexOf('=')
+        if ($separator -gt 0) {
+            $name = [uri]::UnescapeDataString($part.Substring(0, $separator))
+            $value = [uri]::UnescapeDataString($part.Substring($separator + 1))
             $values[$name] = $value
         }
     }
     return $values
 }
 
-function Assert-ClusterPackageUri {
+function Assert-ClusterPackageEndpoint {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Value)
 
@@ -172,20 +172,49 @@ function Assert-ClusterPackageUri {
             "PackageUri must be an HTTPS Azure Blob SAS URL ending in '$($script:PackageBlobName)'."
         )
     }
+    return $uri.AbsoluteUri
+}
 
-    $query = Get-SasQueryValues -Uri $uri
-    if (-not $query.ContainsKey('sig') -or
-        -not $query.ContainsKey('se') -or
-        -not $query.ContainsKey('sp') -or
-        ([string]$query.sp).IndexOf('r', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+function Assert-UserDelegationSasQuery {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Query,
+        [Parameter(Mandatory)][string]$Resource,
+        [Parameter(Mandatory)][string]$Permissions
+    )
+
+    $requiredDelegationFields = @(
+        'sig', 'se', 'sp', 'spr', 'sr', 'skoid', 'sktid',
+        'skt', 'ske', 'sks', 'skv'
+    )
+    if (@($requiredDelegationFields | Where-Object {
+                -not $Query.ContainsKey($_) -or
+                [string]::IsNullOrWhiteSpace([string]$Query[$_])
+            }).Count -gt 0 -or
+        -not ([string]$Query.sp).Equals(
+            $Permissions,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not ([string]$Query.spr).Equals(
+            'https',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not ([string]$Query.sr).Equals(
+            $Resource,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not ([string]$Query.sks).Equals(
+            'b',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
         throw [System.ArgumentException]::new(
-            'PackageUri must contain an unexpired SAS with read permission.'
+            "SAS must use exact permissions '$Permissions', HTTPS, resource '$Resource', and user delegation."
         )
     }
 
     $expires = [DateTimeOffset]::MinValue
     if (-not [DateTimeOffset]::TryParse(
-            [string]$query.se,
+            [string]$Query.se,
             [Globalization.CultureInfo]::InvariantCulture,
             [Globalization.DateTimeStyles]::AssumeUniversal -bor
                 [Globalization.DateTimeStyles]::AdjustToUniversal,
@@ -195,7 +224,81 @@ function Assert-ClusterPackageUri {
             'PackageUri contains an expired or invalid SAS expiry.'
         )
     }
+}
+
+function Assert-ClusterPackageUri {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Value)
+
+    $absoluteUri = Assert-ClusterPackageEndpoint -Value $Value
+    $uri = [uri]$absoluteUri
+    Assert-UserDelegationSasQuery `
+        -Query (Get-SasQueryValues -Uri $uri) `
+        -Resource 'b' `
+        -Permissions 'r'
     return $uri.AbsoluteUri
+}
+
+function Assert-ClusterResultsUri {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Value,
+        [Parameter(Mandatory)][string]$PackageUri
+    )
+
+    $candidate = $Value.Trim()
+    $uri = $null
+    if (-not [uri]::TryCreate($candidate, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne 'https' -or
+        -not $uri.Host.EndsWith(
+            '.blob.core.windows.net',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::IsNullOrEmpty($uri.Fragment) -or
+        -not [string]::IsNullOrEmpty($uri.UserInfo) -or
+        -not $uri.IsDefaultPort) {
+        throw [System.ArgumentException]::new(
+            'ResultsContainerUri must be an HTTPS Azure Blob container SAS URL.'
+        )
+    }
+
+    $package = [uri]$PackageUri
+    $packageContainerPath = $package.AbsolutePath.Substring(
+        0,
+        $package.AbsolutePath.LastIndexOf('/')
+    )
+    if (-not $uri.Host.Equals(
+            $package.Host,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $uri.AbsolutePath.TrimEnd('/') -cne (
+            $packageContainerPath + '-results'
+        )) {
+        throw [System.ArgumentException]::new(
+            'ResultsContainerUri must target the separate derived results container.'
+        )
+    }
+
+    Assert-UserDelegationSasQuery `
+        -Query (Get-SasQueryValues -Uri $uri) `
+        -Resource 'c' `
+        -Permissions 'c'
+    return $uri.AbsoluteUri
+}
+
+function Test-SameClusterPackageEndpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$First,
+        [Parameter(Mandatory)][string]$Second
+    )
+
+    $firstUri = [uri]$First
+    $secondUri = [uri]$Second
+    return $firstUri.Host.Equals(
+        $secondUri.Host,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -and $firstUri.AbsolutePath -ceq $secondUri.AbsolutePath
 }
 
 function Resolve-SyncRunnerConfiguration {
@@ -230,11 +333,13 @@ function Resolve-SyncRunnerConfiguration {
         )
     }
 
-    $configuration.PackageUri = Assert-ClusterPackageUri `
+    $configuration.PackageUri = Assert-ClusterPackageEndpoint `
         -Value ([string]$configuration.PackageUri)
     if (-not $configuration.ContainsKey('TaskExecutionRoot') -or
         [string]::IsNullOrWhiteSpace([string]$configuration.TaskExecutionRoot)) {
-        $configuration.TaskExecutionRoot = Join-Path $PSScriptRoot 'Tasks'
+        $configuration.TaskExecutionRoot = Join-Path (
+            Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SyncSAW'
+        ) 'Tasks'
     }
     $configuration.TaskExecutionRoot = [IO.Path]::GetFullPath(
         [Environment]::ExpandEnvironmentVariables(
@@ -256,6 +361,130 @@ function Resolve-SyncRunnerConfiguration {
     }
     $configuration.IntervalSeconds = $parsedInterval
     return $configuration
+}
+
+function Assert-NoReparsePointInPath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetPathRoot($fullPath)
+    $current = $root
+    foreach ($segment in $fullPath.Substring($root.Length).Split('\')) {
+        if ([string]::IsNullOrWhiteSpace($segment)) {
+            continue
+        }
+        $current = Join-Path $current $segment
+        if (-not (Test-Path -LiteralPath $current)) {
+            break
+        }
+        $item = Get-Item -LiteralPath $current -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw [System.Security.SecurityException]::new(
+                "Runner directories cannot contain a reparse point: '$current'."
+            )
+        }
+    }
+}
+
+function Initialize-SecureDirectory {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if ($fullPath.StartsWith('\\')) {
+        throw [System.Security.SecurityException]::new(
+            'Runner directories must be on a local fixed drive.'
+        )
+    }
+    $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($fullPath))
+    if ($drive.DriveType -ne [IO.DriveType]::Fixed) {
+        throw [System.Security.SecurityException]::new(
+            'Runner directories must be on a local fixed drive.'
+        )
+    }
+
+    Assert-NoReparsePointInPath -Path $fullPath
+    [void][IO.Directory]::CreateDirectory($fullPath)
+    Assert-NoReparsePointInPath -Path $fullPath
+    $directory = Get-Item -LiteralPath $fullPath -Force
+    if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw [System.Security.SecurityException]::new(
+            "Secure runner directory cannot be a reparse point: '$fullPath'."
+        )
+    }
+
+    $administrators = [Security.Principal.SecurityIdentifier]::new(
+        [Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid,
+        $null
+    )
+    $system = [Security.Principal.SecurityIdentifier]::new(
+        [Security.Principal.WellKnownSidType]::LocalSystemSid,
+        $null
+    )
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner($administrators)
+    [void]$security.AddAccessRule(
+        [Security.AccessControl.FileSystemAccessRule]::new(
+            $administrators,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            $allow
+        )
+    )
+    [void]$security.AddAccessRule(
+        [Security.AccessControl.FileSystemAccessRule]::new(
+            $system,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            $allow
+        )
+    )
+    Set-Acl -LiteralPath $fullPath -AclObject $security
+    Assert-NoReparsePointInPath -Path $fullPath
+    return $fullPath
+}
+
+function Initialize-SecureExecutionRoot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    $trustedParent = [IO.Path]::GetFullPath(
+        (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SyncSAW')
+    )
+    $requested = [IO.Path]::GetFullPath($Path)
+    $trustedPrefix = $trustedParent.TrimEnd('\') + '\'
+    if (-not $requested.Equals(
+            $trustedParent,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and
+        -not $requested.StartsWith(
+            $trustedPrefix,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw [System.Security.SecurityException]::new(
+            "TaskExecutionRoot must be '$trustedParent' or one of its subdirectories."
+        )
+    }
+
+    $current = Initialize-SecureDirectory -Path $trustedParent
+    $relative = $requested.Substring($trustedParent.Length).TrimStart(
+        [char[]]@('\')
+    )
+    foreach ($segment in $relative.Split('\')) {
+        if ([string]::IsNullOrWhiteSpace($segment)) {
+            continue
+        }
+        $current = Initialize-SecureDirectory -Path (Join-Path $current $segment)
+    }
+    return $current
 }
 
 function Assert-SyncRunnerAdministrator {
@@ -298,6 +527,11 @@ function Get-RemotePackageMetadata {
         if ([long]$response.ContentLength -gt $script:MaximumPackageBytes) {
             throw [System.IO.InvalidDataException]::new(
                 "Remote package exceeds the $($script:MaximumPackageBytes)-byte limit."
+            )
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$response.Headers['ETag'])) {
+            throw [System.IO.InvalidDataException]::new(
+                'Remote package metadata did not include an ETag.'
             )
         }
         return [pscustomobject]@{
@@ -393,7 +627,8 @@ function Receive-ClusterPackage {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Uri,
-        [Parameter(Mandatory)][string]$Destination
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$ExpectedETag
     )
 
     $request = [Net.HttpWebRequest]::Create($Uri)
@@ -401,6 +636,7 @@ function Receive-ClusterPackage {
     $request.AllowAutoRedirect = $false
     $request.Timeout = 30000
     $request.ReadWriteTimeout = 30000
+    $request.Headers['If-Match'] = $ExpectedETag
     $response = $null
     $output = $null
     try {
@@ -413,6 +649,13 @@ function Receive-ClusterPackage {
         if ([long]$response.ContentLength -gt $script:MaximumPackageBytes) {
             throw [System.IO.InvalidDataException]::new(
                 "Remote package exceeds the $($script:MaximumPackageBytes)-byte limit."
+            )
+        }
+        $responseETag = [string]$response.Headers['ETag']
+        if ([string]::IsNullOrWhiteSpace($responseETag) -or
+            $responseETag -cne $ExpectedETag) {
+            throw [System.IO.InvalidDataException]::new(
+                'The downloaded package ETag does not match the metadata check.'
             )
         }
         $output = [IO.File]::Open(
@@ -430,6 +673,11 @@ function Receive-ClusterPackage {
         }
         finally {
             $input.Dispose()
+        }
+        return [pscustomobject]@{
+            ETag = $responseETag
+            LastModifiedUtc = [DateTimeOffset]$response.LastModified.ToUniversalTime()
+            ContentLength = [long]$response.ContentLength
         }
     }
     finally {
@@ -554,21 +802,24 @@ function Get-RefreshedPackageUri {
     $configuration = Read-SyncRunnerJson -Path $path
     if (-not $configuration.ContainsKey('SchemaVersion') -or
         [int]$configuration.SchemaVersion -ne 1 -or
-        -not $configuration.ContainsKey('PackageUri')) {
+        -not $configuration.ContainsKey('PackageUri') -or
+        -not $configuration.ContainsKey('ResultsContainerUri')) {
         throw [IO.InvalidDataException]::new(
             "Package '$($script:PackageConfigName)' has an unsupported schema."
         )
     }
 
     $refreshed = Assert-ClusterPackageUri -Value ([string]$configuration.PackageUri)
-    $current = [uri]$CurrentPackageUri
-    $next = [uri]$refreshed
-    if (-not $current.Host.Equals($next.Host, [StringComparison]::OrdinalIgnoreCase) -or
-        $current.AbsolutePath -cne $next.AbsolutePath) {
+    if (-not (Test-SameClusterPackageEndpoint `
+            -First $CurrentPackageUri `
+            -Second $refreshed)) {
         throw [IO.InvalidDataException]::new(
             'Package attempted to change the configured Blob endpoint.'
         )
     }
+    [void](Assert-ClusterResultsUri `
+        -Value ([string]$configuration.ResultsContainerUri) `
+        -PackageUri $refreshed)
     return $refreshed
 }
 
@@ -587,10 +838,13 @@ function Install-ClusterPackage {
     $stagingPath = Join-Path $ExecutionRoot (
         '.staging-{0}' -f [guid]::NewGuid().ToString('N')
     )
-    $packagesRoot = Join-Path $ExecutionRoot 'packages'
-    [void](New-Item -ItemType Directory -Path $packagesRoot -Force)
+    $packagesRoot = Initialize-SecureDirectory `
+        -Path (Join-Path $ExecutionRoot 'packages')
     try {
-        Receive-ClusterPackage -Uri $PackageUri -Destination $downloadPath
+        $downloadedMetadata = Receive-ClusterPackage `
+            -Uri $PackageUri `
+            -Destination $downloadPath `
+            -ExpectedETag ([string]$RemoteMetadata.ETag)
         Expand-ClusterPackageSafely `
             -ArchivePath $downloadPath `
             -Destination $stagingPath
@@ -598,10 +852,11 @@ function Install-ClusterPackage {
             -PackageDirectory $stagingPath `
             -CurrentPackageUri $PackageUri
         $versionName = '{0}-{1}' -f `
-            ([DateTimeOffset]$RemoteMetadata.LastModifiedUtc).ToString('yyyyMMddHHmmss'),
+            ([DateTimeOffset]$downloadedMetadata.LastModifiedUtc).ToString('yyyyMMddHHmmss'),
             [guid]::NewGuid().ToString('N').Substring(0, 8)
         $packageDirectory = Join-Path $packagesRoot $versionName
         [IO.Directory]::Move($stagingPath, $packageDirectory)
+        [void](Initialize-SecureDirectory -Path $packageDirectory)
 
         Save-SyncRunnerJson `
             -Path (Join-Path $ExecutionRoot $script:RuntimeConfigFileName) `
@@ -610,19 +865,10 @@ function Install-ClusterPackage {
                 PackageUri = $refreshedUri
                 IntervalSeconds = $PollingInterval
             }
-        Save-SyncRunnerJson `
-            -Path (Join-Path $ExecutionRoot $script:StateFileName) `
-            -Value @{
-                SchemaVersion = 1
-                ETag = [string]$RemoteMetadata.ETag
-                LastModifiedUtc = (
-                    [DateTimeOffset]$RemoteMetadata.LastModifiedUtc
-                ).ToUniversalTime().ToString('O')
-                PackageDirectory = $packageDirectory
-            }
         return [pscustomobject]@{
             PackageDirectory = $packageDirectory
             PackageUri = $refreshedUri
+            Metadata = $downloadedMetadata
         }
     }
     finally {
@@ -688,17 +934,49 @@ function Invoke-SyncRunner {
     $configuration = Resolve-SyncRunnerConfiguration `
         -Path ([IO.Path]::GetFullPath($ConfigPath)) `
         -Overrides $overrides
-    $root = [string]$configuration.TaskExecutionRoot
-    [void](New-Item -ItemType Directory -Path $root -Force)
+    $root = Initialize-SecureExecutionRoot `
+        -Path ([string]$configuration.TaskExecutionRoot)
 
     $runtimeConfigPath = Join-Path $root $script:RuntimeConfigFileName
+    $statePath = Join-Path $root $script:StateFileName
+    $bootstrapPackageUri = [string]$configuration.PackageUri
+    $runtimeWasReset = $false
+    $runtimeWasRejected = $false
     if (Test-Path -LiteralPath $runtimeConfigPath -PathType Leaf) {
         $runtime = Read-SyncRunnerJson -Path $runtimeConfigPath
         if ($runtime.ContainsKey('PackageUri')) {
-            $configuration.PackageUri = Assert-ClusterPackageUri `
-                -Value ([string]$runtime.PackageUri)
+            $runtimeEndpoint = $null
+            try {
+                $runtimeEndpoint = Assert-ClusterPackageEndpoint `
+                    -Value ([string]$runtime.PackageUri)
+            }
+            catch {
+                Remove-Item -LiteralPath $runtimeConfigPath -Force
+                $runtimeWasRejected = $true
+            }
+            if ($null -ne $runtimeEndpoint -and
+                -not (Test-SameClusterPackageEndpoint `
+                    -First $bootstrapPackageUri `
+                    -Second $runtimeEndpoint)) {
+                Remove-Item -LiteralPath $runtimeConfigPath -Force
+                Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+                $runtimeWasReset = $true
+            }
+            elseif ($null -ne $runtimeEndpoint -and
+                -not $script:RunnerBoundParameters.ContainsKey('PackageUri')) {
+                try {
+                    $configuration.PackageUri = Assert-ClusterPackageUri `
+                        -Value ([string]$runtime.PackageUri)
+                }
+                catch {
+                    Remove-Item -LiteralPath $runtimeConfigPath -Force
+                    $runtimeWasRejected = $true
+                }
+            }
         }
     }
+    $configuration.PackageUri = Assert-ClusterPackageUri `
+        -Value ([string]$configuration.PackageUri)
 
     $mutexNameBytes = [Text.Encoding]::UTF8.GetBytes(
         [IO.Path]::GetFullPath($ConfigPath).ToLowerInvariant()
@@ -731,9 +1009,16 @@ function Invoke-SyncRunner {
         }
 
         Write-SyncRunnerLog -Root $root -Message 'Package runner started.'
+        if ($runtimeWasReset) {
+            Write-SyncRunnerLog -Root $root `
+                -Message 'Discarded runtime SAS and package state for a changed bootstrap endpoint.'
+        }
+        elseif ($runtimeWasRejected) {
+            Write-SyncRunnerLog -Root $root `
+                -Message 'Discarded an invalid or expired runtime SAS and used the bootstrap SAS.'
+        }
         while ($true) {
             try {
-                $statePath = Join-Path $root $script:StateFileName
                 $state = if (Test-Path -LiteralPath $statePath -PathType Leaf) {
                     Read-SyncRunnerJson -Path $statePath
                 }
@@ -763,6 +1048,23 @@ function Invoke-SyncRunner {
                         Write-SyncRunnerLog -Root $root `
                             -Message 'Package has no run.ps1; execution was skipped.'
                     }
+                    Save-SyncRunnerJson `
+                        -Path $statePath `
+                        -Value @{
+                            SchemaVersion = 1
+                            ETag = [string]$installed.Metadata.ETag
+                            LastModifiedUtc = (
+                                [DateTimeOffset]$installed.Metadata.LastModifiedUtc
+                            ).ToUniversalTime().ToString('O')
+                            PackageDirectory = $installed.PackageDirectory
+                            RunExitCode = if ($null -eq $process) {
+                                $null
+                            }
+                            else {
+                                [int]$process.ExitCode
+                            }
+                            CompletedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+                        }
                     Remove-OldClusterPackages `
                         -ExecutionRoot $root `
                         -CurrentPackageDirectory $installed.PackageDirectory

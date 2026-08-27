@@ -119,12 +119,12 @@ SAS query strings and signatures are redacted before writing. AzCopy also keeps
 its own diagnostic logs under `%USERPROFILE%\.azcopy`.
 
 The GUI never requests or stores account keys, passwords, or client secrets.
-When cluster package publishing is enabled, it generates a seven-day read-only
-Blob SAS in memory, writes it only into the package rollover configuration, and
-removes the temporary archive after upload. The SAS is not persisted in GUI
-settings or logs. AzCopy owns its Microsoft Entra token cache independently of
-the application. The PowerShell SAW client can alternatively load a SAS from
-its config as described below.
+When cluster package publishing is enabled, it generates seven-day package-read
+and results-upload SAS values in memory, writes them only into the package
+configuration, and removes the temporary archive after upload. Neither SAS is
+persisted in GUI settings or logs. AzCopy owns its Microsoft Entra token cache
+independently of the application. The PowerShell SAW client can alternatively
+load a SAS from its config as described below.
 
 ## PowerShell SAW client
 
@@ -254,10 +254,13 @@ key, or interactive login is required on the cluster machine.
 The desktop app builds `cluster_package.zip` from the selected local folder.
 It excludes `.syncsaw`, `cluster_package.zip`, and `cluster_package.config`,
 adds a generated `cluster_package.config` containing a refreshed Blob-scoped
-read-only user delegation SAS, then uploads the archive with the desktop user's
-Entra credential. When publishing is enabled, the first configured refresh
-publishes immediately and later successful publications are spaced 24 hours
-apart. The delegation key and SAS each cover exactly seven days.
+read-only package SAS and a container-scoped create-only results SAS. The app
+creates a separate `<configured-container>-results` container and uploads the
+archive with the desktop user's Entra credential. Neither SAS can list, overwrite,
+or delete Blobs. When publishing is enabled, the first automatic
+synchronization cycle (or **Sync now**) publishes after pending transfers
+finish; later successful publications are spaced 24 hours apart. The delegation
+keys and SAS values each cover exactly seven days.
 
 Bootstrap each cluster machine by copying `Sync.ps1` and `Sync.config.json`,
 then place a valid full SAS URL for the package in `PackageUri`:
@@ -270,8 +273,13 @@ then place a valid full SAS URL for the package in `PackageUri`:
 }
 ```
 
-The bootstrap SAS should be a short-lived, HTTPS-only Blob SAS with read
-permission. One way to create it from the signed-in management computer is:
+For privileged execution safety, `TaskExecutionRoot` must be
+`C:\ProgramData\SyncSAW` or a subdirectory. The runner rejects network/removable
+drives and reparse points, and protects each directory it uses with
+Administrators/SYSTEM-only ACLs.
+
+The bootstrap SAS must be an HTTPS-only, Blob-scoped, read-only user delegation
+SAS. One way to create it from the signed-in management computer is:
 
 ```powershell
 $start = (Get-Date).ToUniversalTime().AddMinutes(-5)
@@ -297,13 +305,25 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
 The runner performs an HTTPS metadata check every 10 seconds by default. It
 downloads only when the Blob Last Modified time is strictly newer than the
 installed version, limits archive size and entry count, blocks ZIP path
-traversal, extracts into a new versioned directory under `TaskExecutionRoot`,
-and atomically records its state. It validates that the embedded rollover SAS
-still targets the same Blob before saving it outside the package. If a root
-`run.ps1` exists, the runner launches it in a child Windows PowerShell process
-and waits for the complete process lifetime; no Blob check occurs while it is
-running. A single-instance mutex prevents overlapping runners. Use `-Once` for
-one check.
+traversal, secures `TaskExecutionRoot` so that only Administrators and SYSTEM
+can write it, extracts into a new versioned directory, and records a package as
+current only after `run.ps1` starts and finishes. It validates that the embedded
+rollover SAS still targets the same Blob before saving it outside the package.
+If a root `run.ps1` exists, the runner launches it in a child Windows PowerShell
+process and waits for the complete process lifetime; no Blob check occurs while
+it is running. A single-instance mutex prevents overlapping runners. Use
+`-Once` for one check.
+
+`run.ps1` reads the generated `ResultsContainerUri` from its adjacent
+`cluster_package.config` and uses that rotating SAS to upload results beneath a
+unique prefix such as `test-results/<machine>/<UTC-run-id>/` in the separate
+results container. It must never embed, persist, or log the SAS. Result uploads
+use create-only permission and `If-None-Match: *`, so a cluster cannot change a
+package, synchronization control record, or prior result. See
+`scripts\RUN-PS1.md` for the contract and `scripts\run.example.ps1` for a
+Windows PowerShell 5.1 Block Blob upload pattern. The configured container name
+must be 55 characters or fewer so the `-results` suffix remains a valid Azure
+container name.
 
 Rollover depends on the currently valid SAS being able to download a newer
 package. If the desktop publisher does not run for seven days, manually replace
@@ -345,7 +365,7 @@ synchronization mode still requires Az.Accounts and Az.Storage; prepare it with
 | --- | --- |
 | `AzCopy was not found` | Install it in a standard Program Files location, configure the executable path, set `AZCOPY_PATH`, or add AzCopy to `PATH`. |
 | `pwsh` was not found or PowerShell 7 is required | On the SAW, open **Software Center** and manually install PowerShell 7. Do not use WinGet, an MSI download, or the Microsoft Store. Then reopen a terminal and run `pwsh .\scripts\Install-SawDependencies.ps1`. |
-| `Sync.ps1` rejects the package URL | Use the complete, unmodified HTTPS SAS URL for `cluster_package.zip`; it must contain read permission and an unexpired `se` value. |
+| `Sync.ps1` rejects the package URL | Use the complete, unmodified HTTPS URL for `cluster_package.zip` with an unexpired, read-only (`sp=r`), HTTPS-only (`spr=https`), Blob-scoped (`sr=b`) user delegation SAS. |
 | Cluster package downloads stop after seven days | Publish from the desktop at least once every seven days. To recover, replace the bootstrap `PackageUri` and delete `.syncsaw-runtime.config` under the task execution root. |
 | Daily package publishing fails | Select **Azure CLI / Windows broker**, sign in again, and confirm the identity has Blob write and user-delegation-key permission at storage-account scope. |
 | Windows PowerShell 5.1 `Sync-SAW.ps1` reports missing Azure modules | If PowerShell 7 cannot be installed, run `scripts\Install-WindowsPowerShellDependencies.ps1` from 64-bit Windows PowerShell 5.1 as the same user that runs the sync job. |

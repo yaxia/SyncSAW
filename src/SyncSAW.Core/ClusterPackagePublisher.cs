@@ -11,13 +11,27 @@ public static class ClusterPackage
     public static readonly TimeSpan SasLifetime = TimeSpan.FromDays(7);
     public const long MaximumArchiveBytes = 2L * 1024 * 1024 * 1024;
     public const long MaximumPayloadBytes = 4L * 1024 * 1024 * 1024;
-    public const int MaximumPayloadFiles = 10_000;
+    // The runner's 10,000-entry archive limit includes the embedded config.
+    public const int MaximumPayloadFiles = 9_999;
+    public const string ResultsContainerSuffix = "-results";
 
     public static bool IsReservedPath(string path)
     {
         var normalized = (path ?? string.Empty).Trim().Trim('"').Replace('\\', '/').TrimStart('/');
         return normalized.Equals(BlobName, StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals(ConfigurationEntryName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string GetResultsContainerName(string packageContainer)
+    {
+        var normalized = StorageEndpoint.NormalizeContainer(packageContainer);
+        if (normalized.Length + ResultsContainerSuffix.Length > 63)
+        {
+            throw new InvalidOperationException(
+                "Daily cluster package publishing requires a container name of 55 characters or fewer " +
+                $"so the separate '{ResultsContainerSuffix.TrimStart('-')}' container can be created.");
+        }
+        return normalized + ResultsContainerSuffix;
     }
 }
 
@@ -45,11 +59,27 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
             settings.StorageAccount,
             settings.Container,
             ClusterPackage.BlobName);
+        var resultsContainer = ClusterPackage.GetResultsContainerName(settings.Container);
+        var expectedResultsContainerUri = StorageEndpoint.BuildContainerUri(
+            settings.StorageAccount,
+            resultsContainer);
         var unroundedStart = now.UtcDateTime.AddMinutes(-5);
         var sasStartsUtc = new DateTimeOffset(
             unroundedStart.AddTicks(-(unroundedStart.Ticks % TimeSpan.TicksPerSecond)));
         var sasExpiresUtc = sasStartsUtc.Add(ClusterPackage.SasLifetime);
         var azureCli = AzureCliLocator.ResolveCommand(settings.AzureCliPath);
+        var createResultsContainer = await runner.RunAsync(
+            azureCli.ExecutablePath,
+            [
+                .. azureCli.PrefixArguments,
+                .. AzCopyArguments.AzureCliEnsureContainer(
+                    settings.StorageAccount,
+                    resultsContainer)
+            ],
+            cancellationToken);
+        EnsureSuccess(
+            $"Azure CLI could not create or validate results container '{resultsContainer}'.",
+            createResultsContainer);
         var sasResult = await runner.RunAsync(
             azureCli.ExecutablePath,
             [
@@ -67,6 +97,32 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
         var sasUri = ParseAndValidateSasUri(
             sasResult.StandardOutput,
             blobUri,
+            "b",
+            "r",
+            sasStartsUtc,
+            sasExpiresUtc);
+        var resultsSasResult = await runner.RunAsync(
+            azureCli.ExecutablePath,
+            [
+                .. azureCli.PrefixArguments,
+                .. AzCopyArguments.AzureCliGenerateContainerCreateSas(
+                    settings.StorageAccount,
+                    resultsContainer,
+                    sasStartsUtc,
+                    sasExpiresUtc)
+            ],
+            cancellationToken,
+            AzCopyProcessMode.SensitiveCaptured);
+        EnsureSuccess(
+            "Azure CLI could not generate the cluster results upload SAS.",
+            resultsSasResult);
+        var resultsContainerUri = ParseAndValidateSasUri(
+            CombineSasTokenWithResourceUri(
+                resultsSasResult.StandardOutput,
+                expectedResultsContainerUri),
+            expectedResultsContainerUri,
+            "c",
+            "c",
             sasStartsUtc,
             sasExpiresUtc);
 
@@ -79,6 +135,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                 settings.LocalFolder,
                 archivePath,
                 sasUri,
+                resultsContainerUri,
                 now.ToUniversalTime(),
                 sasExpiresUtc,
                 cancellationToken);
@@ -109,6 +166,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
         string sourceRoot,
         string archivePath,
         Uri packageUri,
+        Uri resultsContainerUri,
         DateTimeOffset issuedUtc,
         DateTimeOffset expiresUtc,
         CancellationToken cancellationToken)
@@ -156,6 +214,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                 {
                     SchemaVersion = 1,
                     PackageUri = packageUri.AbsoluteUri,
+                    ResultsContainerUri = resultsContainerUri.AbsoluteUri,
                     IssuedUtc = issuedUtc,
                     ExpiresUtc = expiresUtc
                 },
@@ -214,7 +273,9 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
 
     private static Uri ParseAndValidateSasUri(
         string output,
-        Uri expectedBlobUri,
+        Uri expectedResourceUri,
+        string expectedResource,
+        string expectedPermissions,
         DateTimeOffset expectedStart,
         DateTimeOffset expectedExpiry)
     {
@@ -223,18 +284,25 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
             .LastOrDefault(line => Uri.TryCreate(line, UriKind.Absolute, out _));
         if (candidate is null || !Uri.TryCreate(candidate, UriKind.Absolute, out var uri) ||
             uri.Scheme != Uri.UriSchemeHttps ||
-            !uri.Host.Equals(expectedBlobUri.Host, StringComparison.OrdinalIgnoreCase) ||
-            !uri.AbsolutePath.Equals(expectedBlobUri.AbsolutePath, StringComparison.Ordinal))
+            !uri.IsDefaultPort ||
+            !string.IsNullOrEmpty(uri.UserInfo) ||
+            !string.IsNullOrEmpty(uri.Fragment) ||
+            !uri.Host.Equals(expectedResourceUri.Host, StringComparison.OrdinalIgnoreCase) ||
+            !uri.AbsolutePath.Equals(expectedResourceUri.AbsolutePath, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
                 "Azure CLI returned an invalid or unexpected cluster package SAS URL.");
         }
 
         var query = ParseQuery(uri.Query);
-        if (!query.TryGetValue("sr", out var resource) || resource != "b" ||
-            !query.TryGetValue("sp", out var permissions) || permissions != "r" ||
+        if (!query.TryGetValue("sr", out var resource) || resource != expectedResource ||
+            !query.TryGetValue("sp", out var permissions) || permissions != expectedPermissions ||
+            !query.TryGetValue("spr", out var protocol) || protocol != "https" ||
             !query.ContainsKey("sig") ||
             !query.ContainsKey("skoid") ||
+            !query.ContainsKey("sktid") ||
+            !query.TryGetValue("sks", out var keyService) || keyService != "b" ||
+            !query.ContainsKey("skv") ||
             !TryGetUtc(query, "st", out var actualStart) ||
             !TryGetUtc(query, "se", out var actualExpiry) ||
             !TryGetUtc(query, "skt", out var actualKeyStart) ||
@@ -245,10 +313,30 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
             actualKeyExpiry != expectedExpiry)
         {
             throw new InvalidDataException(
-                "Azure CLI returned a SAS that is not the requested seven-day, read-only Blob SAS.");
+                $"Azure CLI returned a SAS that is not the requested seven-day " +
+                $"{expectedPermissions} {expectedResource} SAS.");
         }
 
         return uri;
+    }
+
+    private static string CombineSasTokenWithResourceUri(string output, Uri resourceUri)
+    {
+        var token = (output ?? string.Empty)
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .LastOrDefault();
+        if (string.IsNullOrWhiteSpace(token) ||
+            Uri.TryCreate(token, UriKind.Absolute, out _))
+        {
+            throw new InvalidDataException(
+                "Azure CLI returned an invalid cluster results SAS token.");
+        }
+
+        var builder = new UriBuilder(resourceUri)
+        {
+            Query = token.TrimStart('?')
+        };
+        return builder.Uri.AbsoluteUri;
     }
 
     private static Dictionary<string, string> ParseQuery(string query)

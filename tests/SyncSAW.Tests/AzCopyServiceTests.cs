@@ -526,6 +526,61 @@ public sealed class AzCopyServiceTests
         }
     }
 
+    [Fact]
+    public async Task UploadAsync_RejectsReservedClusterPackagePath()
+    {
+        var runner = new RecordingRunner();
+        var service = new AzCopyService(runner);
+        var temporaryDirectory = Directory.CreateTempSubdirectory("SyncSAW.Tests.");
+        try
+        {
+            var localFile = Path.Combine(temporaryDirectory.FullName, "payload.zip");
+            await File.WriteAllTextAsync(localFile, "payload");
+            var settings = new SyncSettings
+            {
+                LocalFolder = temporaryDirectory.FullName,
+                StorageAccount = "account123",
+                Container = "container",
+                AzCopyPath = CreateFakeAzCopy(temporaryDirectory)
+            };
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                service.UploadAsync(
+                    settings,
+                    localFile,
+                    ClusterPackage.BlobName,
+                    CancellationToken.None));
+
+            Assert.Contains("reserved", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Null(runner.Arguments);
+        }
+        finally
+        {
+            temporaryDirectory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DeleteRemoteBatchAsync_RejectsReservedInternalPaths()
+    {
+        var runner = new RecordingRunner();
+        var service = new AzCopyService(runner);
+        var settings = new SyncSettings
+        {
+            StorageAccount = "account123",
+            Container = "container"
+        };
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.DeleteRemoteBatchAsync(
+                settings,
+                [ClusterPackage.BlobName],
+                CancellationToken.None));
+
+        Assert.Contains("reserved", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(runner.Arguments);
+    }
+
     private static string CreateFakeAzCopy(DirectoryInfo directory)
     {
         var path = Path.Combine(directory.FullName, "azcopy.exe");

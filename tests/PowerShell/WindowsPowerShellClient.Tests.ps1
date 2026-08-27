@@ -4,6 +4,12 @@ Describe 'Windows PowerShell 5.1 cluster package runner' {
         $runnerPath = Join-Path $repoRoot 'scripts\Sync.ps1'
         $sawPath = Join-Path $repoRoot 'scripts\Sync-SAW.ps1'
         $installerPath = Join-Path $repoRoot 'scripts\Install-WindowsPowerShellDependencies.ps1'
+        $delegationSas =
+            '?sp=r&spr=https&se=2099-01-01T00%3A00%3A00Z&sr=b' +
+            '&skoid=00000000-0000-0000-0000-000000000001' +
+            '&sktid=00000000-0000-0000-0000-000000000002' +
+            '&skt=2098-12-31T00%3A00%3A00Z&ske=2099-01-01T00%3A00%3A00Z' +
+            '&sks=b&skv=2026-04-06&sig=test'
         . $runnerPath
     }
 
@@ -16,6 +22,7 @@ $failed = $false
 foreach ($relativePath in @(
     'scripts\Sync-SAW.ps1',
     'scripts\Sync.ps1',
+    'scripts\run.example.ps1',
     'scripts\Install-WindowsPowerShellDependencies.ps1'
 )) {
     $path = Join-Path $RepoRoot $relativePath
@@ -51,6 +58,33 @@ if ($failed) { exit 1 }
         $process.ExitCode | Should -Be 0
     }
 
+    It 'parses SAS query values correctly in Windows PowerShell 5.1' {
+        $probePath = Join-Path $TestDrive 'Test-SasParsing.ps1'
+        @"
+`$ErrorActionPreference = 'Stop'
+. '$($runnerPath.Replace("'", "''"))'
+`$uri = [uri]('https://account123.blob.core.windows.net/packages/' +
+    'cluster_package.zip$delegationSas')
+`$values = Get-SasQueryValues -Uri `$uri
+if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
+[void](Assert-ClusterPackageUri -Value `$uri.AbsoluteUri)
+"@ | Set-Content -LiteralPath $probePath -Encoding UTF8
+
+        $process = Start-Process `
+            -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -ArgumentList @(
+                '-NoLogo',
+                '-NoProfile',
+                '-NonInteractive',
+                '-File',
+                $probePath
+            ) `
+            -Wait `
+            -PassThru
+
+        $process.ExitCode | Should -Be 0
+    }
+
     It 'does not depend on Entra, Az modules, Azure CLI, or AzCopy' {
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             $runnerPath,
@@ -71,21 +105,52 @@ if ($failed) { exit 1 }
     It 'accepts only an HTTPS Azure Blob SAS for cluster_package.zip' {
         $valid =
             'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
-            '?sp=r&se=2099-01-01T00%3A00%3A00Z&sr=b&sig=test'
+            $delegationSas
 
         Assert-ClusterPackageUri -Value $valid | Should -Be $valid
         {
             Assert-ClusterPackageUri -Value (
                 'https://account123.blob.core.windows.net/packages/other.zip' +
-                '?sp=r&se=2099-01-01T00%3A00%3A00Z&sr=b&sig=test'
+                $delegationSas
             )
         } | Should -Throw
         {
             Assert-ClusterPackageUri -Value (
                 'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
-                '?sp=l&se=2099-01-01T00%3A00%3A00Z&sr=b&sig=test'
+                $delegationSas.Replace('sp=r', 'sp=l')
             )
         } | Should -Throw
+        foreach ($unsafeQuery in @(
+                $delegationSas.Replace('sp=r', 'sp=rw'),
+                $delegationSas.Replace('sr=b', 'sr=c'),
+                $delegationSas.Replace('&spr=https', '')
+            )) {
+            {
+                Assert-ClusterPackageUri -Value (
+                    'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
+                    $unsafeQuery
+                )
+            } | Should -Throw '*exact permissions*'
+        }
+    }
+
+    It 'defaults task execution to the secured ProgramData hierarchy' {
+        $configurationPath = Join-Path $TestDrive 'minimal.config.json'
+        @{
+            PackageUri = (
+                'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
+                $delegationSas
+            )
+        } | ConvertTo-Json | Set-Content -LiteralPath $configurationPath -Encoding UTF8
+
+        $configuration = Resolve-SyncRunnerConfiguration `
+            -Path $configurationPath `
+            -Overrides @{}
+        $expectedRoot = Join-Path (
+            Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SyncSAW'
+        ) 'Tasks'
+
+        $configuration.TaskExecutionRoot | Should -Be $expectedRoot
     }
 
     It 'requires a strictly newer Blob timestamp and treats a matching ETag as current' {
@@ -164,13 +229,17 @@ if ($failed) { exit 1 }
             -Path (Join-Path $TestDrive 'package') -Force
         $current =
             'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
-            '?sp=r&se=2099-01-01T00%3A00%3A00Z&sr=b&sig=old'
+            $delegationSas.Replace('sig=test', 'sig=old')
         $next =
             'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
-            '?sp=r&se=2099-02-01T00%3A00%3A00Z&sr=b&sig=new'
+            $delegationSas.Replace('sig=test', 'sig=new')
+        $results =
+            'https://account123.blob.core.windows.net/packages-results' +
+            $delegationSas.Replace('sp=r', 'sp=c').Replace('sr=b', 'sr=c')
         @{
             SchemaVersion = 1
             PackageUri = $next
+            ResultsContainerUri = $results
         } | ConvertTo-Json | Set-Content `
             -LiteralPath (Join-Path $packageDirectory 'cluster_package.config') `
             -Encoding UTF8
@@ -182,6 +251,7 @@ if ($failed) { exit 1 }
         @{
             SchemaVersion = 1
             PackageUri = $next.Replace('account123', 'otheraccount')
+            ResultsContainerUri = $results
         } | ConvertTo-Json | Set-Content `
             -LiteralPath (Join-Path $packageDirectory 'cluster_package.config') `
             -Encoding UTF8
@@ -190,5 +260,68 @@ if ($failed) { exit 1 }
                 -PackageDirectory $packageDirectory `
                 -CurrentPackageUri $current
         } | Should -Throw '*change the configured Blob endpoint*'
+    }
+
+    It 'accepts only a create-only results SAS for the derived container' {
+        $package =
+            'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
+            $delegationSas
+        $results =
+            'https://account123.blob.core.windows.net/packages-results' +
+            $delegationSas.Replace('sp=r', 'sp=c').Replace('sr=b', 'sr=c')
+
+        Assert-ClusterResultsUri -Value $results -PackageUri $package |
+            Should -Be $results
+        {
+            Assert-ClusterResultsUri `
+                -Value $results.Replace('sp=c', 'sp=rc') `
+                -PackageUri $package
+        } | Should -Throw '*exact permissions*'
+        {
+            Assert-ClusterResultsUri `
+                -Value $results.Replace('/packages-results?', '/other?') `
+                -PackageUri $package
+        } | Should -Throw '*derived results container*'
+    }
+
+    It 'compares bootstrap and runtime endpoints without considering SAS values' {
+        $first =
+            'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
+            $delegationSas
+        $renewed = $first.Replace('sig=test', 'sig=renewed')
+
+        Test-SameClusterPackageEndpoint -First $first -Second $renewed |
+            Should -BeTrue
+        Test-SameClusterPackageEndpoint `
+            -First $first `
+            -Second $renewed.Replace('/packages/', '/different/') |
+            Should -BeFalse
+    }
+
+    It 'uses the metadata ETag as an If-Match download condition and saves state after execution' {
+        $content = Get-Content -LiteralPath $runnerPath -Raw
+
+        (Get-Command Receive-ClusterPackage).Parameters.Keys |
+            Should -Contain 'ExpectedETag'
+        $ifMatchAssignment = [regex]::Escape(
+            "`$request.Headers['If-Match'] = `$ExpectedETag"
+        )
+        $content | Should -Match $ifMatchAssignment
+        $runIndex = $content.IndexOf('$process = Invoke-ClusterPackageRun')
+        $completedStateIndex = $content.IndexOf('RunExitCode = if')
+        $runIndex | Should -BeGreaterThan -1
+        $completedStateIndex | Should -BeGreaterThan $runIndex
+        $content | Should -Match 'Initialize-SecureDirectory'
+        $content | Should -Match 'Assert-NoReparsePointInPath'
+        $content | Should -Match 'SetAccessRuleProtection\(\$true, \$false\)'
+    }
+
+    It 'prevents SAW deletion requests from targeting reserved deployment blobs' {
+        $content = Get-Content -LiteralPath $sawPath -Raw
+        $reservedDeletionGuard = [regex]::Escape(
+            '(Test-SawInternalBlob -BlobPath $relativePath)'
+        )
+
+        $content | Should -Match $reservedDeletionGuard
     }
 }

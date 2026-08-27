@@ -966,7 +966,8 @@ function Invoke-CloudDeletionRequests {
                 -not $request.Name.Equals(
                     (Get-SawDeletionMarkerPath -RelativePath $relativePath),
                     [StringComparison]::OrdinalIgnoreCase
-                )
+                ) -or
+                (Test-SawInternalBlob -BlobPath $relativePath)
             ) {
                 throw [System.IO.InvalidDataException]::new(
                     "Invalid SAW deletion request: $($request.Name)"

@@ -153,10 +153,12 @@ public sealed class AzCopyService(IAzCopyRunner runner)
             throw new FileNotFoundException("The local file does not exist.", localFile);
         }
 
+        var normalizedBlobPath = ValidateRelativeTransferPath(blobPath);
+        EnsureUserManagedBlobPath(normalizedBlobPath);
         var destination = StorageEndpoint.BuildBlobUri(
             settings.StorageAccount,
             settings.Container,
-            blobPath);
+            normalizedBlobPath);
         var executable = AzCopyLocator.Find(settings.AzCopyPath);
         _ = await EnsureContainerExistsAsync(
             settings,
@@ -211,6 +213,10 @@ public sealed class AzCopyService(IAzCopyRunner runner)
         if (paths.Length == 0)
         {
             throw new ArgumentException("Choose at least one remote file to delete.", nameof(blobPaths));
+        }
+        foreach (var path in paths)
+        {
+            EnsureUserManagedBlobPath(path);
         }
 
         var executable = AzCopyLocator.Find(settings.AzCopyPath);
@@ -374,6 +380,15 @@ public sealed class AzCopyService(IAzCopyRunner runner)
         }
 
         return normalized;
+    }
+
+    private static void EnsureUserManagedBlobPath(string relativePath)
+    {
+        if (SawSyncFlag.IsInternal(relativePath))
+        {
+            throw new InvalidOperationException(
+                $"'{relativePath}' is reserved for SyncSAW internal use.");
+        }
     }
 
     private static string ResolveLocalTransferPath(string root, string relativePath)

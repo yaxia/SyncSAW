@@ -668,7 +668,7 @@
                                        Foreground="{DynamicResource MutedBrush}"
                                        FontSize="11"
                                        TextWrapping="Wrap"
-                                       Text="Packages the selected local folder, embeds a seven-day read-only user delegation SAS for rollover, and requires Azure CLI / Windows broker authentication."/>
+                                       Text="Packages the selected local folder and creates a separate results container with seven-day package-read and result-create SAS values. Requires Azure CLI / Windows broker authentication."/>
 
                             <Separator Margin="0,18,0,13"
                                        Background="{DynamicResource BorderBrush}"/>

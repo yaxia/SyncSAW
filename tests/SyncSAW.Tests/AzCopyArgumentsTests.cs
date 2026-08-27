@@ -141,6 +141,41 @@ public sealed class AzCopyArgumentsTests
     }
 
     [Fact]
+    public void AzureCliGenerateContainerCreateSas_UsesCreateOnlyContainerScope()
+    {
+        var starts = DateTimeOffset.Parse("2026-08-27T01:00:00Z");
+        var expires = starts.AddDays(7);
+
+        var arguments = AzCopyArguments.AzureCliGenerateContainerCreateSas(
+            "account123",
+            "container",
+            starts,
+            expires);
+        var argumentArray = arguments.ToArray();
+
+        Assert.Equal(["storage", "container", "generate-sas"], arguments.Take(3));
+        Assert.Equal("c", arguments[Array.IndexOf(argumentArray, "--permissions") + 1]);
+        Assert.Contains("--https-only", arguments);
+        Assert.Contains("--as-user", arguments);
+        Assert.DoesNotContain("--full-uri", arguments);
+        Assert.DoesNotContain("--account-key", arguments);
+    }
+
+    [Fact]
+    public void AzureCliEnsureContainer_UsesLoginWithoutSecrets()
+    {
+        var arguments = AzCopyArguments.AzureCliEnsureContainer(
+            "account123",
+            "container-results");
+
+        Assert.Equal(["storage", "container", "create"], arguments.Take(3));
+        Assert.Contains("--auth-mode", arguments);
+        Assert.Contains("login", arguments);
+        Assert.Contains("container-results", arguments);
+        Assert.DoesNotContain("--account-key", arguments);
+    }
+
+    [Fact]
     public void MakeContainer_UsesSafeMachineReadableArguments()
     {
         var arguments = AzCopyArguments.MakeContainer(ContainerUri);

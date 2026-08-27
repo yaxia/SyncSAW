@@ -65,6 +65,50 @@ public static class AzCopyArguments
         "tsv"
     ];
 
+    public static IReadOnlyList<string> AzureCliGenerateContainerCreateSas(
+        string account,
+        string container,
+        DateTimeOffset startsUtc,
+        DateTimeOffset expiresUtc) =>
+    [
+        "storage",
+        "container",
+        "generate-sas",
+        "--account-name",
+        StorageEndpoint.NormalizeAccount(account),
+        "--name",
+        StorageEndpoint.NormalizeContainer(container),
+        "--permissions",
+        "c",
+        "--start",
+        startsUtc.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        "--expiry",
+        expiresUtc.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        "--https-only",
+        "--auth-mode",
+        "login",
+        "--as-user",
+        "--output",
+        "tsv"
+    ];
+
+    public static IReadOnlyList<string> AzureCliEnsureContainer(
+        string account,
+        string container) =>
+    [
+        "storage",
+        "container",
+        "create",
+        "--account-name",
+        StorageEndpoint.NormalizeAccount(account),
+        "--name",
+        StorageEndpoint.NormalizeContainer(container),
+        "--auth-mode",
+        "login",
+        "--output",
+        "none"
+    ];
+
     public static IReadOnlyList<string> List(Uri containerUri) =>
     [
         "list",
