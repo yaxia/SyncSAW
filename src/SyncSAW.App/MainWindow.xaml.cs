@@ -5,6 +5,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using SyncSAW.Core;
 using Forms = System.Windows.Forms;
@@ -65,7 +66,7 @@ public partial class MainWindow : Window
             Visible = true,
             ContextMenuStrip = CreateTrayMenu()
         };
-        _trayIcon.DoubleClick += (_, _) => Dispatcher.Invoke(ShowFromTray);
+        _trayIcon.DoubleClick += (_, _) => Dispatcher.Invoke(BringToForeground);
 
         Loaded += Window_Loaded;
         Closing += Window_Closing;
@@ -1030,18 +1031,29 @@ public partial class MainWindow : Window
     private Forms.ContextMenuStrip CreateTrayMenu()
     {
         var menu = new Forms.ContextMenuStrip();
-        menu.Items.Add("Open SyncSAW", null, (_, _) => Dispatcher.Invoke(ShowFromTray));
+        menu.Items.Add("Open SyncSAW", null, (_, _) => Dispatcher.Invoke(BringToForeground));
         menu.Items.Add("Sync now", null, (_, _) => Dispatcher.Invoke(() => SyncNow_Click(this, new RoutedEventArgs())));
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => Dispatcher.Invoke(ExitApplication));
         return menu;
     }
 
-    private void ShowFromTray()
+    internal void BringToForeground()
     {
         Show();
-        WindowState = WindowState.Normal;
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
         Activate();
+        Focus();
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle != IntPtr.Zero)
+        {
+            _ = App.NativeMethods.ShowWindow(handle, App.NativeMethods.RestoreWindow);
+            _ = App.NativeMethods.SetForegroundWindow(handle);
+        }
     }
 
     private void ShowTrayBalloon(string title, string message)

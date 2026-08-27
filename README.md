@@ -101,6 +101,12 @@ The WPF application launches AzCopy directly with `ProcessStartInfo.ArgumentList
 
 The GUI refreshes at the selected interval and synchronizes unless `PauseSync` is enabled in its persisted settings. It uses one shared operation gate, so jobs never overlap. Periodic refreshes are skipped when another job is active; a confirmed **Delete selected** operation instead waits behind the active job and runs as soon as the gate is available. The delete button is disabled while that request is queued or running to prevent duplicate submissions. Use **Cancel** to stop an active login or transfer; SyncSAW terminates the complete child-process tree. Minimizing can keep the app in the notification area, while closing the window always cancels background work and exits.
 
+Only one SyncSAW desktop process can run for each signed-in Windows user. Opening
+the application when it is not running starts it normally. Opening its icon
+again signals the existing process, restores it from the notification area or
+minimized state, and brings its window to the foreground instead of starting a
+second instance.
+
 Remote file controls support upload/update, download, opening a temporary downloaded copy, and delete. Use the **Select** checkboxes or Ctrl/Shift row selection to build an explicit batch; the **Delete selected** button shows its item count. The styled confirmation lists the selected Blobs and warns when matching local files will also be removed. Matching server-local files are removed before the remote batch so automatic synchronization cannot recreate the Blobs. Every durable SAW deletion request is published before any Blob is removed, and deletion is verified against Azure before the view refreshes. The requests tell SAW to remove corresponding local copies and any Blob recreated by an older SAW process, then consume each request. There is no broad deletion mode; only explicitly selected paths are deleted. When an AzCopy command fails, planned rows are marked as errors and the original error is shown.
 
 Every AzCopy child-process invocation, exit code, duration, standard output, and
