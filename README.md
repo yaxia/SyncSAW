@@ -6,6 +6,7 @@ It includes:
 
 - A .NET 8 WPF management application with a configurable 5-second to 1-minute background interval, optional automatic sync, notification-area behavior, dry-run status planning, and remote file management.
 - A standalone PowerShell 7 SAW client for one-shot or continuous synchronization.
+- A Windows PowerShell 5.1 test-cluster package runner that needs no Entra identity or Azure modules.
 - A testable core library that owns input validation, safe AzCopy argument construction, process execution, output parsing, and concurrency control.
 
 SyncSAW uses one deterministic merge policy: local files are authoritative for paths that exist locally, while cloud-only files download without overwriting local content. Files are deleted only through an explicit selection and destructive-action confirmation in the management application.
@@ -15,7 +16,7 @@ SyncSAW uses one deterministic merge policy: local files are authoritative for p
 - Windows 10 or later
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) to build the GUI
 - PowerShell 7 for `scripts\Sync-SAW.ps1`; on a SAW, install it manually from **Software Center**
-- 64-bit Windows PowerShell 5.1 for the optional `scripts\Sync.ps1` fallback on machines where PowerShell 7 cannot be installed
+- Elevated 64-bit Windows PowerShell 5.1 for the optional `scripts\Sync.ps1` test-cluster package runner
 - [AzCopy v10](https://learn.microsoft.com/azure/storage/common/storage-use-azcopy-v10) for the WPF management application only
 - Azure PowerShell `Az.Accounts` 5.5.0+ and `Az.Storage` 9.4.0+ for the standalone SAW client; use the included dependency installer below
 - [Azure CLI 2.61+](https://learn.microsoft.com/cli/azure/install-azure-cli-windows) for the GUI's Windows broker login
@@ -28,8 +29,11 @@ Assign the role at the storage account or container scope:
 | List and download | **Storage Blob Data Reader** |
 | Upload, update, synchronize, or delete | **Storage Blob Data Contributor** |
 | Create a missing container | **Storage Blob Data Contributor** |
+| Publish the daily cluster package and user delegation SAS | **Storage Blob Data Contributor** at storage-account scope |
 
 Azure control-plane roles such as Owner or Contributor do not automatically grant Blob data access. RBAC changes can take several minutes to propagate.
+Generating a user delegation key is a storage-account operation, so a role
+assigned only at container scope is insufficient for cluster package publishing.
 
 ### Prepare management server dependencies
 
@@ -91,13 +95,17 @@ The WPF application launches AzCopy directly with `ProcessStartInfo.ArgumentList
 5. Select **Sign in** and complete the Windows account prompt. Azure CLI 2.61+ uses WAM on Windows, allowing Conditional Access to evaluate device claims. SyncSAW selects the configured subscription, and AzCopy reuses the brokered token.
 6. Select **Refresh** to list remote blobs and run AzCopy dry-run planning.
 7. Review each file's state, time, size, planned action, and **Synced to SAW** flag. Synchronization runs automatically while the app is open at the selected 5-, 10-, 30-, or 60-second interval. Use the toggle only to pause/resume transfers.
+8. To serve test-cluster machines, enable **Publish cluster_package.zip every
+   day** under **Advanced settings**. This option requires **Azure CLI / Windows
+   broker** authentication.
 
 The GUI refreshes at the selected interval and synchronizes unless `PauseSync` is enabled in its persisted settings. It uses one shared operation gate, so jobs never overlap. Periodic refreshes are skipped when another job is active; a confirmed **Delete selected** operation instead waits behind the active job and runs as soon as the gate is available. The delete button is disabled while that request is queued or running to prevent duplicate submissions. Use **Cancel** to stop an active login or transfer; SyncSAW terminates the complete child-process tree. Minimizing can keep the app in the notification area, while closing the window always cancels background work and exits.
 
 Remote file controls support upload/update, download, opening a temporary downloaded copy, and delete. Use the **Select** checkboxes or Ctrl/Shift row selection to build an explicit batch; the **Delete selected** button shows its item count. The styled confirmation lists the selected Blobs and warns when matching local files will also be removed. Matching server-local files are removed before the remote batch so automatic synchronization cannot recreate the Blobs. Every durable SAW deletion request is published before any Blob is removed, and deletion is verified against Azure before the view refreshes. The requests tell SAW to remove corresponding local copies and any Blob recreated by an older SAW process, then consume each request. There is no broad deletion mode; only explicitly selected paths are deleted. When an AzCopy command fails, planned rows are marked as errors and the original error is shown.
 
 Every AzCopy child-process invocation, exit code, duration, standard output, and
-standard error is appended to daily local logs:
+standard error is appended to daily local logs. Output from the Azure CLI
+command that creates a SAS is deliberately omitted:
 
 The GUI stores non-secret settings at
 `%LOCALAPPDATA%\SyncSAW\settings.json` and writes daily operation logs under
@@ -110,7 +118,13 @@ installation directory may be read-only.
 SAS query strings and signatures are redacted before writing. AzCopy also keeps
 its own diagnostic logs under `%USERPROFILE%\.azcopy`.
 
-The GUI never requests or stores account keys, SAS tokens, passwords, or client secrets. AzCopy owns its Microsoft Entra token cache independently of the application. The PowerShell client can alternatively load a SAS from its config as described below.
+The GUI never requests or stores account keys, passwords, or client secrets.
+When cluster package publishing is enabled, it generates a seven-day read-only
+Blob SAS in memory, writes it only into the package rollover configuration, and
+removes the temporary archive after upload. The SAS is not persisted in GUI
+settings or logs. AzCopy owns its Microsoft Entra token cache independently of
+the application. The PowerShell SAW client can alternatively load a SAS from
+its config as described below.
 
 ## PowerShell SAW client
 
@@ -230,46 +244,79 @@ pwsh .\scripts\Sync-SAW.ps1 `
 
 The script validates config and command-line inputs, rejects unknown config properties, acquires a per-folder/container mutex, signs in through Azure PowerShell by default, performs all transfers with Az.Storage cmdlets, writes a daily transcript beside the script by default (or to `LogDirectory` when configured), publishes SAW status markers, and stops cleanly on Ctrl+C. Storage operations retry transient HTTP/network failures up to four times with exponential backoff. In continuous mode, an exhausted transient failure is logged and retried on the next cycle. If an Entra access or refresh token expires, the script forces a new interactive/WAM sign-in, rebuilds its storage context, and retries the interrupted cycle. Closing or failing that sign-in does not terminate continuous mode; it prompts again after a later cycle. Authorization, invalid configuration, and invalid deletion requests remain fatal. Set `PauseSync` to `true` to keep a continuous client running without transfers. Storage account keys and application secrets are not accepted. For upgrade compatibility, an old config containing `DeletionMode: false` is accepted and ignored; `DeletionMode: true` is rejected with guidance to use explicit management-client deletion.
 
-## Windows PowerShell 5.1 fallback
+## Test-cluster package delivery
 
-Use `scripts\Sync.ps1` only on machines where PowerShell 7 cannot be installed.
-It runs under 64-bit Windows PowerShell 5.1 and delegates to the same
-synchronization implementation as `Sync-SAW.ps1`, so synchronization and
-security behavior remain identical. Keep `Sync.ps1`, `Sync-SAW.ps1`, and
-`Sync.config.json` together in the same directory.
+`scripts\Sync.ps1` is a separate Windows PowerShell 5.1 package runner for test
+machines that cannot use an Entra identity. It uses only built-in Windows
+PowerShell and .NET APIs: no PowerShell 7, Az modules, Azure CLI, AzCopy, account
+key, or interactive login is required on the cluster machine.
 
-Install the Windows PowerShell dependencies once as the same Windows user that
-will run the synchronization job:
+The desktop app builds `cluster_package.zip` from the selected local folder.
+It excludes `.syncsaw`, `cluster_package.zip`, and `cluster_package.config`,
+adds a generated `cluster_package.config` containing a refreshed Blob-scoped
+read-only user delegation SAS, then uploads the archive with the desktop user's
+Entra credential. When publishing is enabled, the first configured refresh
+publishes immediately and later successful publications are spaced 24 hours
+apart. The delegation key and SAS each cover exactly seven days.
+
+Bootstrap each cluster machine by copying `Sync.ps1` and `Sync.config.json`,
+then place a valid full SAS URL for the package in `PackageUri`:
+
+```json
+{
+  "PackageUri": "https://contosodata.blob.core.windows.net/packages/cluster_package.zip?sp=r&...",
+  "TaskExecutionRoot": "C:\\ProgramData\\SyncSAW\\Tasks",
+  "IntervalSeconds": 10
+}
+```
+
+The bootstrap SAS should be a short-lived, HTTPS-only Blob SAS with read
+permission. One way to create it from the signed-in management computer is:
+
+```powershell
+$start = (Get-Date).ToUniversalTime().AddMinutes(-5)
+$expiry = $start.AddDays(7)
+az storage blob generate-sas `
+  --account-name contosodata `
+  --container-name packages `
+  --name cluster_package.zip `
+  --permissions r `
+  --start $start.ToString('yyyy-MM-ddTHH:mm:ssZ') `
+  --expiry $expiry.ToString('yyyy-MM-ddTHH:mm:ssZ') `
+  --https-only --auth-mode login --as-user --full-uri --output tsv
+```
+
+Protect `Sync.config.json` with Windows ACLs, then run from an elevated 64-bit
+Windows PowerShell 5.1 session:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
-  .\scripts\Install-WindowsPowerShellDependencies.ps1
+  .\Sync.ps1
 ```
 
-The installer validates a 64-bit Windows PowerShell 5.1 Desktop host, enables
-TLS 1.2 for its process, verifies the selected registered HTTPS PowerShellGet
-repository, and installs only compatible `Az.Accounts` 5.3.4+ and
-`Az.Storage` 9.4.0+ modules at `CurrentUser` scope. It validates every Azure
-cmdlet and parameter used by the synchronization client. It does not install
-PowerShell, persist repository trust changes, or install the full `Az` rollup.
-Use `-Repository '<name>'` for an internal repository. A custom untrusted
-repository additionally requires `-AllowUntrustedRepository`; the official
-HTTPS PSGallery endpoint is accepted without persisting a trust change.
+The runner performs an HTTPS metadata check every 10 seconds by default. It
+downloads only when the Blob Last Modified time is strictly newer than the
+installed version, limits archive size and entry count, blocks ZIP path
+traversal, extracts into a new versioned directory under `TaskExecutionRoot`,
+and atomically records its state. It validates that the embedded rollover SAS
+still targets the same Blob before saving it outside the package. If a root
+`run.ps1` exists, the runner launches it in a child Windows PowerShell process
+and waits for the complete process lifetime; no Blob check occurs while it is
+running. A single-instance mutex prevents overlapping runners. Use `-Once` for
+one check.
 
-Edit `scripts\Sync.config.json`, then start the job:
+Rollover depends on the currently valid SAS being able to download a newer
+package. If the desktop publisher does not run for seven days, manually replace
+the bootstrap `PackageUri` and delete
+`TaskExecutionRoot\.syncsaw-runtime.config`. Anyone allowed to replace
+`cluster_package.zip` can cause `run.ps1` to execute as local administrator;
+use a dedicated storage account/container, tightly restrict Blob write RBAC,
+and treat package publishing access as privileged code-deployment access.
 
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
-  .\scripts\Sync.ps1
-```
-
-The fallback config has the same fields and override rules as
-`Sync-SAW.config.json`. Command-line parameters can also be passed directly to
-`Sync.ps1`. Interactive Microsoft Entra sign-in and cached CurrentUser contexts
-are supported. A non-interactive scheduled task must run as the same Windows
-identity that established the cached context; otherwise use a suitably scoped,
-protected SAS config and secure the config file with Windows ACLs. No storage
-account keys are supported.
+`Sync-SAW.ps1` also remains syntactically compatible with Windows PowerShell
+5.1 for machines where PowerShell 7 cannot be installed. That full
+synchronization mode still requires Az.Accounts and Az.Storage; prepare it with
+`Install-WindowsPowerShellDependencies.ps1` and invoke `Sync-SAW.ps1` directly.
 
 ## Synchronization semantics
 
@@ -281,7 +328,7 @@ account keys are supported.
 - In the WPF server app, an existing source-local file is authoritative and is never overwritten by cloud download. The server supplements AzCopy planning with size and newer-local-timestamp checks. On SAW, cloud is authoritative for every path that already exists remotely.
 - Folder structure is preserved. Manual upload keeps a path relative to the selected local root; files chosen outside that root upload at the container root.
 - After each successful PowerShell SAW cycle, the script synchronizes sidecar marker blobs under `.syncsaw/saw-flags/`. The marker name is a SHA-256 hash of the case-sensitive blob path. A marker is published only when the local size and exact timestamp match the current Blob, then the source is listed again to detect an update that raced marker publication. The GUI reports **Synced to SAW: Yes** only when this verified marker is at least as new as the source blob.
-- `.syncsaw/saw-flags/` and `.syncsaw/deletions/` are reserved for SyncSAW internals. These blobs are hidden from the GUI and excluded from normal synchronization.
+- `.syncsaw/saw-flags/`, `.syncsaw/deletions/`, `cluster_package.zip`, and `cluster_package.config` are reserved for SyncSAW internals. These paths are hidden from the GUI and excluded from normal synchronization.
 
 ## Limitations
 
@@ -298,7 +345,10 @@ account keys are supported.
 | --- | --- |
 | `AzCopy was not found` | Install it in a standard Program Files location, configure the executable path, set `AZCOPY_PATH`, or add AzCopy to `PATH`. |
 | `pwsh` was not found or PowerShell 7 is required | On the SAW, open **Software Center** and manually install PowerShell 7. Do not use WinGet, an MSI download, or the Microsoft Store. Then reopen a terminal and run `pwsh .\scripts\Install-SawDependencies.ps1`. |
-| Windows PowerShell 5.1 `Sync.ps1` reports missing Azure modules | If PowerShell 7 cannot be installed, run `scripts\Install-WindowsPowerShellDependencies.ps1` from 64-bit Windows PowerShell 5.1 as the same user that runs the sync job. |
+| `Sync.ps1` rejects the package URL | Use the complete, unmodified HTTPS SAS URL for `cluster_package.zip`; it must contain read permission and an unexpired `se` value. |
+| Cluster package downloads stop after seven days | Publish from the desktop at least once every seven days. To recover, replace the bootstrap `PackageUri` and delete `.syncsaw-runtime.config` under the task execution root. |
+| Daily package publishing fails | Select **Azure CLI / Windows broker**, sign in again, and confirm the identity has Blob write and user-delegation-key permission at storage-account scope. |
+| Windows PowerShell 5.1 `Sync-SAW.ps1` reports missing Azure modules | If PowerShell 7 cannot be installed, run `scripts\Install-WindowsPowerShellDependencies.ps1` from 64-bit Windows PowerShell 5.1 as the same user that runs the sync job. |
 | `Az.Accounts` or `Az.Storage` module was not found | In PowerShell 7, run `scripts\Install-SawDependencies.ps1`. If no approved repository is registered, follow `http://aka.ms/sawpwsh`; do not automatically register or trust PSGallery. |
 | `403` or authorization failure | Confirm the Blob data role, resource scope, tenant, and RBAC propagation; control-plane Contributor is insufficient. |
 | Entra error `530033` | Remote device flow is blocked by device-based Conditional Access. The SAW script uses Azure PowerShell browser/WAM authentication; the GUI uses **Azure CLI / Windows broker**. If it still fails, use the correlation ID in Entra sign-in logs to identify the applied policy. |

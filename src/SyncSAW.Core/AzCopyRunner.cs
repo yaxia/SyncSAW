@@ -6,6 +6,7 @@ namespace SyncSAW.Core;
 public enum AzCopyProcessMode
 {
     Captured,
+    SensitiveCaptured,
     Interactive
 }
 
@@ -39,7 +40,8 @@ public sealed class AzCopyProcessRunner : IAzCopyRunner
         IReadOnlyDictionary<string, string?>? environmentVariables = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
-        var captureOutput = mode == AzCopyProcessMode.Captured;
+        var captureOutput = mode != AzCopyProcessMode.Interactive;
+        var logOutput = mode != AzCopyProcessMode.SensitiveCaptured;
         var stopwatch = Stopwatch.StartNew();
         if (_operationLog is not null)
         {
@@ -121,7 +123,13 @@ public sealed class AzCopyProcessRunner : IAzCopyRunner
                 if (_operationLog is not null)
                 {
                     await _operationLog.WriteCommandCompletedAsync(
-                        cancelledResult,
+                        logOutput
+                            ? cancelledResult
+                            : cancelledResult with
+                            {
+                                StandardOutput = string.Empty,
+                                StandardError = string.Empty
+                            },
                         stopwatch.Elapsed);
                 }
                 return cancelledResult;
@@ -133,7 +141,15 @@ public sealed class AzCopyProcessRunner : IAzCopyRunner
                 await stderrTask.ConfigureAwait(false));
             if (_operationLog is not null)
             {
-                await _operationLog.WriteCommandCompletedAsync(result, stopwatch.Elapsed);
+                await _operationLog.WriteCommandCompletedAsync(
+                    logOutput
+                        ? result
+                        : result with
+                        {
+                            StandardOutput = string.Empty,
+                            StandardError = string.Empty
+                        },
+                    stopwatch.Elapsed);
             }
             return result;
         }

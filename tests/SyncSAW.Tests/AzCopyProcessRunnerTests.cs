@@ -60,4 +60,37 @@ public sealed class AzCopyProcessRunnerTests
             directory.Delete(recursive: true);
         }
     }
+
+    [Fact]
+    public async Task RunAsync_DoesNotLogSensitiveCapturedOutput()
+    {
+        var directory = Directory.CreateTempSubdirectory("SyncSAW.SensitiveRunnerLogs.");
+        try
+        {
+            var runner = new AzCopyProcessRunner(new OperationLog(directory.FullName));
+            var powershell = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "WindowsPowerShell",
+                "v1.0",
+                "powershell.exe");
+
+            var result = await runner.RunAsync(
+                powershell,
+                ["-NoProfile", "-Command", "[Console]::Out.Write($env:TEST_SECRET)"],
+                CancellationToken.None,
+                AzCopyProcessMode.SensitiveCaptured,
+                new Dictionary<string, string?> { ["TEST_SECRET"] = "sensitive-token" });
+
+            Assert.Equal("sensitive-token", result.StandardOutput);
+            var path = Assert.Single(Directory.GetFiles(directory.FullName, "*.log"));
+            var content = await File.ReadAllTextAsync(path);
+            Assert.Contains("END exit=0", content);
+            Assert.DoesNotContain("sensitive-token", content);
+            Assert.DoesNotContain("STDOUT", content);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
 }

@@ -38,6 +38,7 @@ public sealed class SyncSettings
     public string? TenantId { get; set; } = DefaultTenantId;
     public string? SubscriptionId { get; set; } = DefaultSubscriptionId;
     public EntraLoginMode LoginMode { get; set; } = EntraLoginMode.AzureCli;
+    public bool PublishClusterPackage { get; set; }
     public AppTheme Theme { get; set; } = AppTheme.System;
 }
 

@@ -34,6 +34,37 @@ public static class AzCopyArguments
         subscriptionId.Trim()
     ];
 
+    public static IReadOnlyList<string> AzureCliGenerateBlobReadSas(
+        string account,
+        string container,
+        string blobName,
+        DateTimeOffset startsUtc,
+        DateTimeOffset expiresUtc) =>
+    [
+        "storage",
+        "blob",
+        "generate-sas",
+        "--account-name",
+        StorageEndpoint.NormalizeAccount(account),
+        "--container-name",
+        StorageEndpoint.NormalizeContainer(container),
+        "--name",
+        StorageEndpoint.NormalizeBlobPath(blobName),
+        "--permissions",
+        "r",
+        "--start",
+        startsUtc.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        "--expiry",
+        expiresUtc.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        "--https-only",
+        "--auth-mode",
+        "login",
+        "--as-user",
+        "--full-uri",
+        "--output",
+        "tsv"
+    ];
+
     public static IReadOnlyList<string> List(Uri containerUri) =>
     [
         "list",
@@ -76,7 +107,7 @@ public static class AzCopyArguments
             localPath,
             containerUri.AbsoluteUri,
             "--recursive=true",
-            "--exclude-path=.syncsaw",
+            $"--exclude-path=.syncsaw;{ClusterPackage.BlobName};{ClusterPackage.ConfigurationEntryName}",
             $"--delete-destination={deleteDestination.ToString().ToLowerInvariant()}",
             "--output-type=json",
             "--log-level=ERROR"

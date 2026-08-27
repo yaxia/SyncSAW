@@ -201,6 +201,48 @@ public sealed class AzCopyServiceTests
     }
 
     [Fact]
+    public async Task GetSnapshotAsync_HidesReservedClusterPackageFilesLocallyAndRemotely()
+    {
+        var runner = new QueuedRunner(
+            new AzCopyCommandResult(
+                0,
+                """{"Items":[{"Path":"cluster_package.zip","ContentLength":42,"LastModifiedTime":"2026-08-27T01:00:00Z"}]}""",
+                string.Empty),
+            new AzCopyCommandResult(0, "{}", string.Empty));
+        var service = new AzCopyService(runner);
+        var temporaryDirectory = Directory.CreateTempSubdirectory("SyncSAW.Tests.");
+        try
+        {
+            var localFolder = Directory.CreateDirectory(
+                Path.Combine(temporaryDirectory.FullName, "source"));
+            await File.WriteAllTextAsync(
+                Path.Combine(localFolder.FullName, ClusterPackage.BlobName),
+                "reserved");
+            await File.WriteAllTextAsync(
+                Path.Combine(localFolder.FullName, ClusterPackage.ConfigurationEntryName),
+                "reserved");
+            var settings = new SyncSettings
+            {
+                LocalFolder = localFolder.FullName,
+                StorageAccount = "account123",
+                Container = "container",
+                AzCopyPath = CreateFakeAzCopy(temporaryDirectory),
+                LoginMode = EntraLoginMode.DeviceCode
+            };
+
+            var snapshot = await service.GetSnapshotAsync(settings, CancellationToken.None);
+
+            Assert.Empty(snapshot.Items);
+            Assert.Empty(snapshot.RemoteBlobs);
+            Assert.Empty(snapshot.Plan);
+        }
+        finally
+        {
+            temporaryDirectory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task GetSnapshotAsync_PlansDownloadOnlyForCloudOnlyFiles()
     {
         const string listOutput =

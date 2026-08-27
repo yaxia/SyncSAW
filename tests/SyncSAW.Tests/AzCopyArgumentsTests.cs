@@ -19,7 +19,9 @@ public sealed class AzCopyArgumentsTests
         Assert.Equal(Path.GetFullPath(@"C:\Data Folder & Reports"), arguments[1]);
         Assert.Equal(ContainerUri.AbsoluteUri, arguments[2]);
         Assert.Contains("--delete-destination=false", arguments);
-        Assert.Contains("--exclude-path=.syncsaw", arguments);
+        Assert.Contains(
+            "--exclude-path=.syncsaw;cluster_package.zip;cluster_package.config",
+            arguments);
         Assert.DoesNotContain(arguments, argument => argument.Contains('"'));
     }
 
@@ -110,6 +112,32 @@ public sealed class AzCopyArgumentsTests
         Assert.Equal(AppTheme.System, settings.Theme);
         Assert.Equal(10, settings.AutoSyncIntervalSeconds);
         Assert.False(settings.PauseSync);
+        Assert.False(settings.PublishClusterPackage);
+    }
+
+    [Fact]
+    public void AzureCliGenerateBlobReadSas_UsesSevenDayReadOnlyBlobScope()
+    {
+        var starts = DateTimeOffset.Parse("2026-08-27T01:00:00Z");
+        var expires = starts.AddDays(7);
+
+        var arguments = AzCopyArguments.AzureCliGenerateBlobReadSas(
+            "account123",
+            "container",
+            ClusterPackage.BlobName,
+            starts,
+            expires);
+        var argumentArray = arguments.ToArray();
+
+        Assert.Equal("storage", arguments[0]);
+        Assert.Equal("blob", arguments[1]);
+        Assert.Equal("generate-sas", arguments[2]);
+        Assert.Equal("r", arguments[Array.IndexOf(argumentArray, "--permissions") + 1]);
+        Assert.Equal("2026-08-27T01:00:00Z", arguments[Array.IndexOf(argumentArray, "--start") + 1]);
+        Assert.Equal("2026-09-03T01:00:00Z", arguments[Array.IndexOf(argumentArray, "--expiry") + 1]);
+        Assert.Contains("--as-user", arguments);
+        Assert.Contains("--full-uri", arguments);
+        Assert.DoesNotContain("--account-key", arguments);
     }
 
     [Fact]

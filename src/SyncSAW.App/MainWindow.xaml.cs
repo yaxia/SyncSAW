@@ -21,6 +21,7 @@ public partial class MainWindow : Window
     private readonly OperationLog _operationLog;
     private readonly AzCopyProcessRunner _processRunner;
     private readonly AzCopyService _azCopy;
+    private readonly ClusterPackagePublisher _clusterPackagePublisher;
     private readonly NonOverlappingOperationScheduler _scheduler = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Icon _applicationIcon;
@@ -35,12 +36,14 @@ public partial class MainWindow : Window
     private bool _restoringFileSelection;
     private bool _settingsPersistenceWarningShown;
     private DateTimeOffset _nextAutomaticSyncUtc;
+    private DateTimeOffset _nextClusterPackagePublishUtc = DateTimeOffset.MinValue;
 
     public MainWindow()
     {
         _operationLog = new OperationLog();
         _processRunner = new AzCopyProcessRunner(_operationLog);
         _azCopy = new AzCopyService(_processRunner);
+        _clusterPackagePublisher = new ClusterPackagePublisher(_processRunner);
         InitializeComponent();
         OperationLogLocationTextBlock.Text =
             $"Operation logs: {OperationLog.DefaultDirectory}";
@@ -384,6 +387,9 @@ public partial class MainWindow : Window
         try
         {
             var snapshot = await _azCopy.GetSnapshotAsync(settings, cancellationToken);
+            var clusterPublication = await PublishClusterPackageIfDueAsync(
+                settings,
+                cancellationToken);
             await Dispatcher.InvokeAsync(() =>
             {
                 ReplaceFileItemsPreservingSelection(snapshot.Items);
@@ -405,15 +411,54 @@ public partial class MainWindow : Window
                     $"{snapshot.RemoteBlobs.Count:N0} remote blobs • checked {DateTime.Now:t}";
                 SetSyncStatusVisual("SuccessBackgroundBrush", "SuccessBrush", "\uE73E");
                 SetConnectionStatus(true);
-                SetStatus(
-                    $"Updated {DateTime.Now:T} • {snapshot.RemoteBlobs.Count:N0} remote blobs • " +
-                    $"{snapshot.Plan.Count:N0} planned actions");
+                SetStatus(clusterPublication is null
+                    ? $"Updated {DateTime.Now:T} • {snapshot.RemoteBlobs.Count:N0} remote blobs • " +
+                      $"{snapshot.Plan.Count:N0} planned actions"
+                    : $"Published {ClusterPackage.BlobName} with " +
+                      $"{clusterPublication.PayloadFileCount:N0} payload files; " +
+                      $"SAS expires {clusterPublication.SasExpiresUtc.ToLocalTime():g}.");
             });
             return snapshot;
         }
         finally
         {
             await Dispatcher.InvokeAsync(() => SetBusy(false));
+        }
+    }
+
+    private async Task<ClusterPackagePublication?> PublishClusterPackageIfDueAsync(
+        SyncSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (!settings.PublishClusterPackage)
+        {
+            _nextClusterPackagePublishUtc = DateTimeOffset.MinValue;
+            return null;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (now < _nextClusterPackagePublishUtc)
+        {
+            return null;
+        }
+
+        try
+        {
+            var publication = await _clusterPackagePublisher.PublishAsync(
+                settings,
+                now,
+                cancellationToken);
+            _nextClusterPackagePublishUtc = now.Add(ClusterPackage.PublishInterval);
+            await _operationLog.WriteEventAsync(
+                $"Published {ClusterPackage.BlobName} with " +
+                $"{publication.PayloadFileCount} payload files; read SAS expires " +
+                $"{publication.SasExpiresUtc:O}.");
+            return publication;
+        }
+        catch
+        {
+            _nextClusterPackagePublishUtc = now.AddMinutes(10);
+            throw;
         }
     }
 
@@ -502,6 +547,14 @@ public partial class MainWindow : Window
             SetConnectionStatus(false);
         }
 
+        if (ReferenceEquals(sender, PublishClusterPackageCheckBox) ||
+            ReferenceEquals(sender, LocalFolderTextBox) ||
+            ReferenceEquals(sender, StorageAccountTextBox) ||
+            ReferenceEquals(sender, ContainerTextBox))
+        {
+            _nextClusterPackagePublishUtc = DateTimeOffset.MinValue;
+        }
+
         if (_initialized)
         {
             await SaveSettingsAsync();
@@ -587,6 +640,7 @@ public partial class MainWindow : Window
         AzureCliPath = NullIfWhiteSpace(AzureCliPathTextBox.Text),
         TenantId = NullIfWhiteSpace(TenantIdTextBox.Text),
         SubscriptionId = NullIfWhiteSpace(SubscriptionIdTextBox.Text),
+        PublishClusterPackage = PublishClusterPackageCheckBox.IsChecked == true,
         LoginMode = (LoginModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() == "DeviceCode"
             ? EntraLoginMode.DeviceCode
             : EntraLoginMode.AzureCli,
@@ -607,6 +661,7 @@ public partial class MainWindow : Window
             ? SyncSettings.DefaultTenantId
             : settings.TenantId;
         SubscriptionIdTextBox.Text = settings.SubscriptionId ?? SyncSettings.DefaultSubscriptionId;
+        PublishClusterPackageCheckBox.IsChecked = settings.PublishClusterPackage;
         LoginModeComboBox.SelectedIndex = settings.LoginMode == EntraLoginMode.AzureCli ? 0 : 1;
         _currentTheme = settings.Theme;
         ThemeComboBox.SelectedIndex = settings.Theme switch

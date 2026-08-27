@@ -6,7 +6,7 @@ Installs SyncSAW dependencies for the Windows PowerShell 5.1 fallback.
 For machines where PowerShell 7 cannot be installed, validates 64-bit Windows
 PowerShell 5.1, an HTTPS PowerShellGet repository, and the tested Az.Accounts
 and Az.Storage versions. Missing modules are installed for CurrentUser,
-imported, and checked for every command and parameter used by Sync.ps1.
+imported, and checked for every command and parameter used by Sync-SAW.ps1.
 
 The installer does not install PowerShell, persist repository trust changes,
 install the full Az rollup module, or store Azure credentials.
@@ -243,7 +243,7 @@ try {
     Write-Host ''
     Write-Host 'SyncSAW Windows PowerShell 5.1 dependency readiness: PASS' -ForegroundColor Green
     $results | Format-Table Module, Version, Path -AutoSize | Out-Host
-    Write-Host 'Review Sync.config.json, then run Sync.ps1 with Windows PowerShell 5.1.'
+    Write-Host 'Review Sync-SAW.config.json, then run Sync-SAW.ps1 with Windows PowerShell 5.1.'
 }
 finally {
     [Net.ServicePointManager]::SecurityProtocol = $originalSecurityProtocol

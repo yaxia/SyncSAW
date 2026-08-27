@@ -69,4 +69,13 @@ public sealed class SawSyncFlagTests
         Assert.Equal("file.txt", file.Path);
         Assert.False(file.SyncedToSaw);
     }
+
+    [Theory]
+    [InlineData("cluster_package.zip")]
+    [InlineData("CLUSTER_PACKAGE.ZIP")]
+    [InlineData("cluster_package.config")]
+    public void IsInternal_HidesClusterDeliveryArtifacts(string path)
+    {
+        Assert.True(SawSyncFlag.IsInternal(path));
+    }
 }

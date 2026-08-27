@@ -62,11 +62,11 @@ Loads the adjacent JSON configuration and starts the configured job.
 Continuously uploads local changes and downloads cloud-only files.
 
 .NOTES
-The SAW deployment requires PowerShell 7 by policy. For machines where
-PowerShell 7 cannot be installed, the shared implementation remains compatible
-with the Windows PowerShell 5.1 Sync.ps1 entry point. Requires Az.Accounts and
-Az.Storage. No storage account keys, passwords, client secrets, or
-executable-specific token adapters are used.
+The SAW deployment requires PowerShell 7 by policy. On machines where
+PowerShell 7 cannot be installed, this script can also be invoked directly with
+Windows PowerShell 5.1 after its compatible Az modules are installed. Requires
+Az.Accounts and Az.Storage. No storage account keys, passwords, client secrets,
+or executable-specific token adapters are used.
 #>
 
 #requires -Version 5.1
@@ -116,6 +116,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:MarkerPrefix = '.syncsaw/saw-flags/'
 $script:DeletionMarkerPrefix = '.syncsaw/deletions/'
+$script:ClusterPackageBlobName = 'cluster_package.zip'
+$script:ClusterPackageConfigName = 'cluster_package.config'
 $script:SasTokenForRedaction = $null
 
 function ConvertTo-SyncSawHashtable {
@@ -681,7 +683,15 @@ function Get-LocalFileRecords {
         $relative = Get-SyncSawRelativePath -Root $Root -Path $file.FullName
         if (
             $relative.Equals('.syncsaw', [StringComparison]::OrdinalIgnoreCase) -or
-            $relative.StartsWith('.syncsaw/', [StringComparison]::OrdinalIgnoreCase)
+            $relative.StartsWith('.syncsaw/', [StringComparison]::OrdinalIgnoreCase) -or
+            $relative.Equals(
+                $script:ClusterPackageBlobName,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            $relative.Equals(
+                $script:ClusterPackageConfigName,
+                [StringComparison]::OrdinalIgnoreCase
+            )
         ) {
             continue
         }
@@ -847,6 +857,14 @@ function Test-SawInternalBlob {
     return $BlobPath.StartsWith($script:MarkerPrefix, [StringComparison]::OrdinalIgnoreCase) -or
         $BlobPath.StartsWith(
             $script:DeletionMarkerPrefix,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $BlobPath.Equals(
+            $script:ClusterPackageBlobName,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $BlobPath.Equals(
+            $script:ClusterPackageConfigName,
             [StringComparison]::OrdinalIgnoreCase
         )
 }

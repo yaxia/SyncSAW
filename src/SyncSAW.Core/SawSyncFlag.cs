@@ -69,7 +69,8 @@ public static class SawSyncFlag
     {
         var normalized = NormalizePath(blobPath);
         return normalized.StartsWith(Prefix, StringComparison.Ordinal) ||
-               normalized.StartsWith(DeletionPrefix, StringComparison.Ordinal);
+               normalized.StartsWith(DeletionPrefix, StringComparison.Ordinal) ||
+               ClusterPackage.IsReservedPath(normalized);
     }
 
     private static bool TryGetMarkerHash(string blobPath, out string hash)

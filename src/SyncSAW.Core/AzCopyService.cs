@@ -84,7 +84,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
                 endpoint,
                 deleteDestination: false),
             cancellationToken,
-            environmentVariables: AuthenticationEnvironment(settings));
+            environmentVariables: AzCopyAuthentication.GetEnvironment(settings));
         EnsureSuccess("AzCopy could not plan local uploads.", uploadPlanResult);
 
         var localFiles = EnumerateLocalFiles(settings.LocalFolder);
@@ -116,7 +116,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
                         settings.Container,
                         uploadPath).AbsoluteUri),
                 cancellationToken,
-                environmentVariables: AuthenticationEnvironment(settings));
+                environmentVariables: AzCopyAuthentication.GetEnvironment(settings));
             EnsureSuccess($"AzCopy upload failed for '{uploadPath}'.", uploadResult);
         }
 
@@ -136,7 +136,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
                         remoteBlob.Path),
                     destination),
                 cancellationToken,
-                environmentVariables: AuthenticationEnvironment(settings));
+                environmentVariables: AzCopyAuthentication.GetEnvironment(settings));
             EnsureSuccess($"AzCopy could not download '{remoteBlob.Path}'.", downloadResult);
         }
     }
@@ -167,7 +167,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
             executable,
             AzCopyArguments.Copy(Path.GetFullPath(localFile), destination.AbsoluteUri),
             cancellationToken,
-            environmentVariables: AuthenticationEnvironment(settings));
+            environmentVariables: AzCopyAuthentication.GetEnvironment(settings));
         EnsureSuccess("AzCopy upload failed.", result);
     }
 
@@ -188,7 +188,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
             AzCopyLocator.Find(settings.AzCopyPath),
             AzCopyArguments.Copy(source.AbsoluteUri, destination),
             cancellationToken,
-            environmentVariables: AuthenticationEnvironment(settings));
+            environmentVariables: AzCopyAuthentication.GetEnvironment(settings));
         EnsureSuccess("AzCopy download failed.", result);
     }
 
@@ -232,7 +232,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
                             settings.Container,
                             SawSyncFlag.GetDeletionMarkerPath(path)).AbsoluteUri),
                     cancellationToken,
-                    environmentVariables: AuthenticationEnvironment(settings));
+                    environmentVariables: AzCopyAuthentication.GetEnvironment(settings));
                 EnsureSuccess(
                     $"AzCopy could not publish the deletion marker for '{path}'.",
                     markerResult);
@@ -247,7 +247,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
                         settings.Container,
                         path)),
                     cancellationToken,
-                    environmentVariables: AuthenticationEnvironment(settings));
+                    environmentVariables: AzCopyAuthentication.GetEnvironment(settings));
                 EnsureSuccess($"AzCopy could not delete '{path}'.", result);
             }
         }
@@ -262,7 +262,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
                 settings.StorageAccount,
                 settings.Container)),
             cancellationToken,
-            environmentVariables: AuthenticationEnvironment(settings));
+            environmentVariables: AzCopyAuthentication.GetEnvironment(settings));
         EnsureSuccess("AzCopy could not verify remote deletion.", listResult);
 
         var remainingPaths = AzCopyOutputParser.ParseRemoteList(listResult.StandardOutput)
@@ -293,13 +293,16 @@ public sealed class AzCopyService(IAzCopyRunner runner)
 
     private static IReadOnlyList<LocalFileInfo> EnumerateLocalFiles(string root) =>
         Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-            .Select(path =>
+            .Select(path => (Path: path, RelativePath:
+                Path.GetRelativePath(root, path).Replace('\\', '/')))
+            .Where(item =>
+                !item.RelativePath.Equals(".syncsaw", StringComparison.OrdinalIgnoreCase) &&
+                !item.RelativePath.StartsWith(".syncsaw/", StringComparison.OrdinalIgnoreCase) &&
+                !ClusterPackage.IsReservedPath(item.RelativePath))
+            .Select(item =>
             {
-                var info = new FileInfo(path);
-                return new LocalFileInfo(
-                    Path.GetRelativePath(root, path).Replace('\\', '/'),
-                    info.LastWriteTimeUtc,
-                    info.Length);
+                var info = new FileInfo(item.Path);
+                return new LocalFileInfo(item.RelativePath, info.LastWriteTimeUtc, info.Length);
             })
             .OrderBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -312,7 +315,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
         IReadOnlyList<RemoteBlobInfo> remoteBlobs,
         CancellationToken cancellationToken)
     {
-        var environment = AuthenticationEnvironment(settings);
+        var environment = AzCopyAuthentication.GetEnvironment(settings);
         var uploadPlanResult = await runner.RunAsync(
             executable,
             AzCopyArguments.PlanUpload(
@@ -414,7 +417,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
         Uri endpoint,
         CancellationToken cancellationToken)
     {
-        var environment = AuthenticationEnvironment(settings);
+        var environment = AzCopyAuthentication.GetEnvironment(settings);
         var listResult = await runner.RunAsync(
             executable,
             AzCopyArguments.List(endpoint),
@@ -456,7 +459,16 @@ public sealed class AzCopyService(IAzCopyRunner runner)
         return markers.Any(marker => output.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static IReadOnlyDictionary<string, string?> AuthenticationEnvironment(SyncSettings settings) =>
+    private static IReadOnlyDictionary<string, string?> AzureCliLoginEnvironment { get; } =
+        new Dictionary<string, string?>
+        {
+            ["AZURE_CORE_LOGIN_EXPERIENCE_V2"] = "off"
+        };
+}
+
+public static class AzCopyAuthentication
+{
+    public static IReadOnlyDictionary<string, string?> GetEnvironment(SyncSettings settings) =>
         settings.LoginMode == EntraLoginMode.AzureCli
             ? new Dictionary<string, string?>
             {
@@ -470,10 +482,4 @@ public sealed class AzCopyService(IAzCopyRunner runner)
                 ["AZCOPY_AUTO_LOGIN_TYPE"] = null,
                 ["AZCOPY_TENANT_ID"] = null
             };
-
-    private static IReadOnlyDictionary<string, string?> AzureCliLoginEnvironment { get; } =
-        new Dictionary<string, string?>
-        {
-            ["AZURE_CORE_LOGIN_EXPERIENCE_V2"] = "off"
-        };
 }

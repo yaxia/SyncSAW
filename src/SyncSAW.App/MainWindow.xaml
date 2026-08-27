@@ -659,6 +659,20 @@
                             <Separator Margin="0,18,0,13"
                                        Background="{DynamicResource BorderBrush}"/>
 
+                            <CheckBox x:Name="PublishClusterPackageCheckBox"
+                                      Margin="2,0,0,0"
+                                      Checked="SettingsChanged"
+                                      Unchecked="SettingsChanged"
+                                      Content="Publish cluster_package.zip every day"/>
+                            <TextBlock Margin="22,5,0,0"
+                                       Foreground="{DynamicResource MutedBrush}"
+                                       FontSize="11"
+                                       TextWrapping="Wrap"
+                                       Text="Packages the selected local folder, embeds a seven-day read-only user delegation SAS for rollover, and requires Azure CLI / Windows broker authentication."/>
+
+                            <Separator Margin="0,18,0,13"
+                                       Background="{DynamicResource BorderBrush}"/>
+
                             <CheckBox x:Name="MinimizeToTrayCheckBox"
                                       Margin="2,0,0,0"
                                       Checked="SettingsChanged"
