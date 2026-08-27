@@ -66,6 +66,42 @@ function Send-TestResult {
     }
 }
 
+function Add-NewTestResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$RelativePath,
+        [Parameter(Mandatory)][string]$Content
+    )
+
+    if ([IO.Path]::IsPathRooted($RelativePath)) {
+        throw [ArgumentException]::new('Result paths must be relative.')
+    }
+    $rootPath = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    $filePath = [IO.Path]::GetFullPath((Join-Path $rootPath $RelativePath))
+    if (-not $filePath.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw [ArgumentException]::new('Result paths must remain beneath test-results.')
+    }
+    $parent = Split-Path -Parent $filePath
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        [void](New-Item -ItemType Directory -Path $parent)
+    }
+
+    $stream = [IO.File]::Open(
+        $filePath,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    $writer = [IO.StreamWriter]::new($stream, [Text.Encoding]::UTF8)
+    try {
+        $writer.Write($Content)
+    }
+    finally {
+        $writer.Dispose()
+    }
+}
+
 $configurationPath = Join-Path $PSScriptRoot 'cluster_package.config'
 $configuration = Get-Content -LiteralPath $configurationPath -Raw |
     ConvertFrom-Json -ErrorAction Stop
@@ -76,9 +112,15 @@ if ([string]::IsNullOrWhiteSpace([string]$configuration.ResultsBlobUri)) {
 }
 
 $resultRoot = Join-Path $PSScriptRoot 'test-results'
-[void](New-Item -ItemType Directory -Path $resultRoot -Force)
+if (Test-Path -LiteralPath $resultRoot) {
+    throw [IO.IOException]::new(
+        "The result directory already exists: '$resultRoot'."
+    )
+}
+[void](New-Item -ItemType Directory -Path $resultRoot)
 
-# Run the test workload here. Write every result artifact beneath $resultRoot.
+# Run the test workload here. It may create new files only. Use unique output
+# names and FileMode.CreateNew, or Add-NewTestResult for text output.
 
 $resultFiles = @(Get-ChildItem -LiteralPath $resultRoot -File -Recurse)
 if ($resultFiles.Count -eq 0) {
@@ -87,21 +129,16 @@ if ($resultFiles.Count -eq 0) {
     )
 }
 
-$archivePath = Join-Path ([IO.Path]::GetTempPath()) (
+$archivePath = Join-Path $PSScriptRoot (
     'syncsaw-results-{0}.zip' -f [guid]::NewGuid().ToString('N')
 )
-try {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [IO.Compression.ZipFile]::CreateFromDirectory(
-        $resultRoot,
-        $archivePath,
-        [IO.Compression.CompressionLevel]::Optimal,
-        $false
-    )
-    Send-TestResult `
-        -BlobSasUri ([string]$configuration.ResultsBlobUri) `
-        -FilePath $archivePath
-}
-finally {
-    Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
-}
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[IO.Compression.ZipFile]::CreateFromDirectory(
+    $resultRoot,
+    $archivePath,
+    [IO.Compression.CompressionLevel]::Optimal,
+    $false
+)
+Send-TestResult `
+    -BlobSasUri ([string]$configuration.ResultsBlobUri) `
+    -FilePath $archivePath

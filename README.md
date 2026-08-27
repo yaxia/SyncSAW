@@ -376,6 +376,16 @@ compressing all output into the single result ZIP. Use a different results
 container only when automatic devbox/SAW backup and analysis are intentionally
 not required.
 
+Agents generating or validating `run.ps1` must follow the repository
+`AGENTS.md` safety harness. They must not restart or kill the SyncSAW desktop
+app, restart the devbox, or delete cloud Blobs for validation. Generated
+`run.ps1` files must treat the cluster node as immutable and create new files
+only: no deletion, overwrite, truncation, append, rename, move, permission
+change, process/service/node restart, dynamic shell, or cloud delete. Run
+`scripts\Test-RunScriptSafety.ps1` before packaging; `Sync.ps1` runs the same
+check again before execution. See `scripts\RUN-PS1.md` for the complete
+contract and limitations.
+
 Rollover depends on the currently valid SAS being able to download a newer
 package. If the desktop publisher does not run for seven days, manually replace
 the bootstrap `PackageUri` and delete

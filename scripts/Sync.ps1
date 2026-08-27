@@ -848,6 +848,10 @@ function Install-ClusterPackage {
         $refreshedUri = Get-RefreshedPackageUri `
             -PackageDirectory $stagingPath `
             -CurrentPackageUri $PackageUri
+        $stagedRunScript = Join-Path $stagingPath 'run.ps1'
+        if (Test-Path -LiteralPath $stagedRunScript -PathType Leaf) {
+            [void](Assert-RunScriptSafety -Path $stagedRunScript)
+        }
         $versionName = '{0}-{1}' -f `
             ([DateTimeOffset]$downloadedMetadata.LastModifiedUtc).ToString('yyyyMMddHHmmss'),
             [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -882,6 +886,7 @@ function Invoke-ClusterPackageRun {
     if (-not (Test-Path -LiteralPath $runScript -PathType Leaf)) {
         return $null
     }
+    [void](Assert-RunScriptSafety -Path $runScript)
     $argumentList = '-NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "{0}"' -f `
         $runScript.Replace('"', '""')
     return Start-Process `
@@ -890,6 +895,259 @@ function Invoke-ClusterPackageRun {
         -WorkingDirectory $PackageDirectory `
         -Wait `
         -PassThru
+}
+
+function Assert-RunScriptSafety {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        throw [IO.FileNotFoundException]::new(
+            "The run script was not found: '$fullPath'.",
+            $fullPath
+        )
+    }
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $fullPath,
+        [ref]$tokens,
+        [ref]$parseErrors
+    )
+    if ($parseErrors.Count -gt 0) {
+        $messages = @($parseErrors | ForEach-Object { $_.Message }) -join '; '
+        throw [IO.InvalidDataException]::new(
+            "run.ps1 contains PowerShell parse errors: $messages"
+        )
+    }
+
+    $blockedCommands = @(
+        'Remove-Item',
+        'Remove-ItemProperty',
+        'Clear-Content',
+        'Set-Content',
+        'Add-Content',
+        'Set-Item',
+        'Set-ItemProperty',
+        'Set-Acl',
+        'Out-File',
+        'Copy-Item',
+        'Move-Item',
+        'Rename-Item',
+        'Compress-Archive',
+        'Restart-Computer',
+        'Stop-Computer',
+        'Restart-Service',
+        'Stop-Service',
+        'Set-Service',
+        'New-Service',
+        'Remove-Service',
+        'Restart-AzVM',
+        'Stop-AzVM',
+        'Remove-AzStorageBlob',
+        'Remove-AzStorageContainer',
+        'Stop-Process',
+        'Invoke-Expression',
+        'Invoke-Command',
+        'New-PSSession',
+        'Enter-PSSession',
+        'Start-Job',
+        'Start-Process',
+        'az',
+        'az.cmd',
+        'az.exe',
+        'azcopy',
+        'azcopy.exe',
+        'cmd',
+        'cmd.exe',
+        'powershell',
+        'powershell.exe',
+        'pwsh',
+        'pwsh.exe',
+        'shutdown',
+        'shutdown.exe',
+        'reboot',
+        'reboot.exe',
+        'taskkill',
+        'taskkill.exe',
+        'wmic',
+        'wmic.exe',
+        'sc',
+        'sc.exe',
+        'net',
+        'net.exe',
+        'schtasks',
+        'schtasks.exe',
+        'robocopy',
+        'robocopy.exe',
+        'xcopy',
+        'xcopy.exe',
+        'diskpart',
+        'diskpart.exe',
+        'fsutil',
+        'fsutil.exe',
+        'rm',
+        'ri',
+        'del',
+        'erase',
+        'rd',
+        'rmdir',
+        'clc',
+        'sc',
+        'ac',
+        'si',
+        'sp',
+        'cp',
+        'copy',
+        'cpi',
+        'mv',
+        'move',
+        'mi',
+        'ren',
+        'rni',
+        'kill',
+        'spps',
+        'spsv'
+    )
+    $blockedMembers = @(
+        'Delete',
+        'DeleteFile',
+        'DeleteDirectory',
+        'Move',
+        'MoveFile',
+        'MoveDirectory',
+        'Replace',
+        'Copy',
+        'WriteAllText',
+        'WriteAllBytes',
+        'WriteAllLines',
+        'AppendAllText',
+        'AppendAllLines',
+        'OpenWrite',
+        'AppendText',
+        'CreateText',
+        'SetAccessControl',
+        'Kill'
+    )
+    $violations = New-Object 'System.Collections.Generic.List[string]'
+
+    $commands = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst]
+    }, $true))
+    foreach ($command in $commands) {
+        $commandName = $command.GetCommandName()
+        if ([string]::IsNullOrWhiteSpace($commandName)) {
+            $violations.Add(
+                "Dynamic command invocation is not allowed at line $($command.Extent.StartLineNumber)."
+            )
+            continue
+        }
+
+        $leafName = [IO.Path]::GetFileName($commandName)
+        if ($blockedCommands -contains $leafName) {
+            $violations.Add(
+                "Command '$commandName' is not allowed at line $($command.Extent.StartLineNumber)."
+            )
+        }
+        if ($leafName -ieq 'New-Item' -or $leafName -ieq 'ni') {
+            $force = @($command.CommandElements | Where-Object {
+                $_ -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $_.ParameterName -ieq 'Force'
+            })
+            if ($force.Count -gt 0) {
+                $violations.Add(
+                    "New-Item -Force can modify existing paths and is not allowed at line " +
+                    "$($command.Extent.StartLineNumber)."
+                )
+            }
+        }
+        if ($command.Extent.Text -match
+            '(?i)(?:-Method\s+|--request\s+|-X\s+)[''"]?DELETE(?:[''"]|\s|$)') {
+            $violations.Add(
+                "HTTP DELETE is not allowed at line $($command.Extent.StartLineNumber)."
+            )
+        }
+    }
+
+    $members = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]
+    }, $true))
+    foreach ($member in $members) {
+        if ($member.Extent.Text -match
+            '(?i)\[(?:System\.)?IO\.FileMode\]::(?:Create|OpenOrCreate|Truncate|Append)\b') {
+            $violations.Add(
+                "File open mode can change an existing file at line " +
+                "$($member.Extent.StartLineNumber)."
+            )
+        }
+        $memberName = if (
+            $member.Member -is
+                [System.Management.Automation.Language.StringConstantExpressionAst]
+        ) {
+            [string]$member.Member.Value
+        }
+        else {
+            $null
+        }
+        if ([string]::IsNullOrWhiteSpace($memberName)) {
+            $violations.Add(
+                "Dynamic method invocation is not allowed at line $($member.Extent.StartLineNumber)."
+            )
+        }
+        elseif ($blockedMembers -contains $memberName) {
+            $violations.Add(
+                "Method '$memberName' is not allowed at line $($member.Extent.StartLineNumber)."
+            )
+        }
+        elseif (
+            $memberName -ieq 'Create' -and
+            $member.Expression.Extent.Text -match
+                '(?i)^\[(?:System\.)?IO\.(?:File|FileInfo)\]$'
+        ) {
+            $violations.Add(
+                "File creation without explicit create-new semantics is not allowed at line " +
+                "$($member.Extent.StartLineNumber)."
+            )
+        }
+    }
+
+    $redirections = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FileRedirectionAst]
+    }, $true))
+    foreach ($redirection in $redirections) {
+        $violations.Add(
+            "File redirection is not allowed at line $($redirection.Extent.StartLineNumber)."
+        )
+    }
+
+    $deleteAssignments = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Extent.Text -match '(?i)\.Method\s*=\s*[''"]DELETE[''"]'
+    }, $true))
+    foreach ($assignment in $deleteAssignments) {
+        $violations.Add(
+            "HTTP DELETE is not allowed at line $($assignment.Extent.StartLineNumber)."
+        )
+    }
+
+    if ($violations.Count -gt 0) {
+        throw [Security.SecurityException]::new(
+            "run.ps1 failed the additive-only safety harness:`r`n- " +
+            ($violations -join "`r`n- ")
+        )
+    }
+
+    return $fullPath
 }
 
 function Remove-OldClusterPackages {

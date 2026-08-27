@@ -3,6 +3,7 @@ Describe 'Windows PowerShell 5.1 cluster package runner' {
         $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
         $runnerPath = Join-Path $repoRoot 'scripts\Sync.ps1'
         $sawPath = Join-Path $repoRoot 'scripts\Sync-SAW.ps1'
+        $runExamplePath = Join-Path $repoRoot 'scripts\run.example.ps1'
         $installerPath = Join-Path $repoRoot 'scripts\Install-WindowsPowerShellDependencies.ps1'
         $delegationSas =
             '?sp=r&spr=https&se=2099-01-01T00%3A00%3A00Z&sr=b' +
@@ -23,6 +24,7 @@ foreach ($relativePath in @(
     'scripts\Sync-SAW.ps1',
     'scripts\Sync.ps1',
     'scripts\run.example.ps1',
+    'scripts\Test-RunScriptSafety.ps1',
     'scripts\Install-WindowsPowerShellDependencies.ps1'
 )) {
     $path = Join-Path $RepoRoot $relativePath
@@ -100,6 +102,37 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         $commands | Should -Not -Contain 'Get-AzStorageBlob'
         $commands | Should -Not -Contain 'az'
         $commands | Should -Not -Contain 'azcopy'
+    }
+
+    It 'accepts the additive-only run.ps1 example' {
+        Assert-RunScriptSafety -Path $runExamplePath |
+            Should -Be ([IO.Path]::GetFullPath($runExamplePath))
+    }
+
+    It 'rejects destructive, overwrite, restart, cloud, and dynamic operations' {
+        $unsafeScripts = @(
+            'Remove-Item -LiteralPath .\result.txt',
+            'Set-Content -LiteralPath .\result.txt -Value changed',
+            'cp .\source.txt .\result.txt',
+            'New-Item -ItemType File -Path .\result.txt -Force',
+            'ni -ItemType File -Path .\result.txt -Force',
+            'Restart-Computer -Force',
+            'az storage blob delete --account-name test --container-name test --name test',
+            '[IO.File]::Delete(''.\result.txt'')',
+            '[IO.File]::Open(''.\result.txt'', [IO.FileMode]::Create)',
+            'Invoke-WebRequest -Uri https://example.test -Method Delete',
+            'Write-Output unsafe > .\result.txt',
+            '$command = ''tool.exe''; & $command'
+        )
+
+        for ($index = 0; $index -lt $unsafeScripts.Count; $index++) {
+            $path = Join-Path $TestDrive "unsafe-$index.ps1"
+            $unsafeScripts[$index] |
+                Set-Content -LiteralPath $path -Encoding UTF8
+
+            { Assert-RunScriptSafety -Path $path } |
+                Should -Throw '*failed the additive-only safety harness*'
+        }
     }
 
     It 'accepts only an HTTPS Azure Blob SAS for cluster_package.zip' {
@@ -312,9 +345,19 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             "`$request.Headers['If-Match'] = `$ExpectedETag"
         )
         $content | Should -Match $ifMatchAssignment
+        $stagedHarnessIndex = $content.IndexOf(
+            '[void](Assert-RunScriptSafety -Path $stagedRunScript)'
+        )
+        $installMoveIndex = $content.IndexOf('[IO.Directory]::Move($stagingPath')
         $runIndex = $content.IndexOf('$process = Invoke-ClusterPackageRun')
+        $harnessIndex = $content.IndexOf('[void](Assert-RunScriptSafety -Path $runScript)')
+        $startIndex = $content.IndexOf('return Start-Process', $harnessIndex)
         $completedStateIndex = $content.IndexOf('RunExitCode = if')
+        $stagedHarnessIndex | Should -BeGreaterThan -1
+        $installMoveIndex | Should -BeGreaterThan $stagedHarnessIndex
         $runIndex | Should -BeGreaterThan -1
+        $harnessIndex | Should -BeGreaterThan -1
+        $startIndex | Should -BeGreaterThan $harnessIndex
         $completedStateIndex | Should -BeGreaterThan $runIndex
         $content | Should -Match 'Initialize-SecureDirectory'
         $content | Should -Match 'Assert-NoReparsePointInPath'
