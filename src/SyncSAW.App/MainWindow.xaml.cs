@@ -37,7 +37,9 @@ public partial class MainWindow : Window
     private bool _settingsPersistenceWarningShown;
     private DateTimeOffset _nextAutomaticSyncUtc;
     private DateTimeOffset _nextClusterPackagePublishUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _nextClusterPackagePublishAttemptUtc = DateTimeOffset.MinValue;
     private int _clusterPackageConfigurationVersion;
+    private string? _lastClusterPackageFingerprint;
 
     public MainWindow()
     {
@@ -442,18 +444,29 @@ public partial class MainWindow : Window
         if (!settings.PublishClusterPackage)
         {
             _nextClusterPackagePublishUtc = DateTimeOffset.MinValue;
+            _nextClusterPackagePublishAttemptUtc = DateTimeOffset.MinValue;
             return null;
         }
 
         var now = DateTimeOffset.UtcNow;
         var configurationVersion = Volatile.Read(ref _clusterPackageConfigurationVersion);
-        if (now < _nextClusterPackagePublishUtc)
+        if (now < _nextClusterPackagePublishAttemptUtc)
         {
             return null;
         }
-
         try
         {
+            var payloadFingerprint = _clusterPackagePublisher.GetPayloadFingerprint(
+                settings.LocalFolder,
+                cancellationToken);
+            if (now < _nextClusterPackagePublishUtc &&
+                payloadFingerprint.Equals(
+                    _lastClusterPackageFingerprint,
+                    StringComparison.Ordinal))
+            {
+                return null;
+            }
+
             var publication = await _clusterPackagePublisher.PublishAsync(
                 settings,
                 now,
@@ -461,6 +474,8 @@ public partial class MainWindow : Window
             if (configurationVersion == Volatile.Read(ref _clusterPackageConfigurationVersion))
             {
                 _nextClusterPackagePublishUtc = now.Add(ClusterPackage.PublishInterval);
+                _nextClusterPackagePublishAttemptUtc = DateTimeOffset.MinValue;
+                _lastClusterPackageFingerprint = publication.PayloadFingerprint;
             }
             await _operationLog.WriteEventAsync(
                 $"Published {ClusterPackage.BlobName} with " +
@@ -472,7 +487,7 @@ public partial class MainWindow : Window
         {
             if (configurationVersion == Volatile.Read(ref _clusterPackageConfigurationVersion))
             {
-                _nextClusterPackagePublishUtc = now.AddMinutes(10);
+                _nextClusterPackagePublishAttemptUtc = now.AddMinutes(10);
             }
             throw;
         }
@@ -566,9 +581,12 @@ public partial class MainWindow : Window
         if (ReferenceEquals(sender, PublishClusterPackageCheckBox) ||
             ReferenceEquals(sender, LocalFolderTextBox) ||
             ReferenceEquals(sender, StorageAccountTextBox) ||
-            ReferenceEquals(sender, ContainerTextBox))
+            ReferenceEquals(sender, ContainerTextBox) ||
+            ReferenceEquals(sender, ClusterResultsContainerTextBox))
         {
             _nextClusterPackagePublishUtc = DateTimeOffset.MinValue;
+            _nextClusterPackagePublishAttemptUtc = DateTimeOffset.MinValue;
+            _lastClusterPackageFingerprint = null;
             Interlocked.Increment(ref _clusterPackageConfigurationVersion);
         }
 
@@ -658,6 +676,8 @@ public partial class MainWindow : Window
         TenantId = NullIfWhiteSpace(TenantIdTextBox.Text),
         SubscriptionId = NullIfWhiteSpace(SubscriptionIdTextBox.Text),
         PublishClusterPackage = PublishClusterPackageCheckBox.IsChecked == true,
+        ClusterResultsContainer =
+            NullIfWhiteSpace(ClusterResultsContainerTextBox.Text)?.ToLowerInvariant(),
         LoginMode = (LoginModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() == "DeviceCode"
             ? EntraLoginMode.DeviceCode
             : EntraLoginMode.AzureCli,
@@ -679,6 +699,7 @@ public partial class MainWindow : Window
             : settings.TenantId;
         SubscriptionIdTextBox.Text = settings.SubscriptionId ?? SyncSettings.DefaultSubscriptionId;
         PublishClusterPackageCheckBox.IsChecked = settings.PublishClusterPackage;
+        ClusterResultsContainerTextBox.Text = settings.ClusterResultsContainer ?? string.Empty;
         LoginModeComboBox.SelectedIndex = settings.LoginMode == EntraLoginMode.AzureCli ? 0 : 1;
         _currentTheme = settings.Theme;
         ThemeComboBox.SelectedIndex = settings.Theme switch

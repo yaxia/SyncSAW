@@ -65,19 +65,22 @@ public static class AzCopyArguments
         "tsv"
     ];
 
-    public static IReadOnlyList<string> AzureCliGenerateContainerCreateSas(
+    public static IReadOnlyList<string> AzureCliGenerateBlobCreateSas(
         string account,
         string container,
+        string blobName,
         DateTimeOffset startsUtc,
         DateTimeOffset expiresUtc) =>
     [
         "storage",
-        "container",
+        "blob",
         "generate-sas",
         "--account-name",
         StorageEndpoint.NormalizeAccount(account),
-        "--name",
+        "--container-name",
         StorageEndpoint.NormalizeContainer(container),
+        "--name",
+        StorageEndpoint.NormalizeBlobPath(blobName),
         "--permissions",
         "c",
         "--start",
@@ -88,6 +91,7 @@ public static class AzCopyArguments
         "--auth-mode",
         "login",
         "--as-user",
+        "--full-uri",
         "--output",
         "tsv"
     ];
@@ -107,6 +111,44 @@ public static class AzCopyArguments
         "login",
         "--output",
         "none"
+    ];
+
+    public static IReadOnlyList<string> AzureCliCreatePrivateContainer(
+        string account,
+        string container) =>
+    [
+        "storage",
+        "container",
+        "create",
+        "--account-name",
+        StorageEndpoint.NormalizeAccount(account),
+        "--name",
+        StorageEndpoint.NormalizeContainer(container),
+        "--public-access",
+        "off",
+        "--auth-mode",
+        "login",
+        "--output",
+        "none"
+    ];
+
+    public static IReadOnlyList<string> AzureCliGetContainerPublicAccess(
+        string account,
+        string container) =>
+    [
+        "storage",
+        "container",
+        "show",
+        "--account-name",
+        StorageEndpoint.NormalizeAccount(account),
+        "--name",
+        StorageEndpoint.NormalizeContainer(container),
+        "--auth-mode",
+        "login",
+        "--query",
+        "properties.publicAccess",
+        "--output",
+        "tsv"
     ];
 
     public static IReadOnlyList<string> List(Uri containerUri) =>

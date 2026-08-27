@@ -258,30 +258,27 @@ function Assert-ClusterResultsUri {
         -not [string]::IsNullOrEmpty($uri.UserInfo) -or
         -not $uri.IsDefaultPort) {
         throw [System.ArgumentException]::new(
-            'ResultsContainerUri must be an HTTPS Azure Blob container SAS URL.'
+            'ResultsBlobUri must be an HTTPS Azure Blob SAS URL.'
         )
     }
 
     $package = [uri]$PackageUri
-    $packageContainerPath = $package.AbsolutePath.Substring(
-        0,
-        $package.AbsolutePath.LastIndexOf('/')
-    )
+    $segments = @($uri.AbsolutePath.Trim('/').Split('/'))
     if (-not $uri.Host.Equals(
             $package.Host,
             [StringComparison]::OrdinalIgnoreCase
         ) -or
-        $uri.AbsolutePath.TrimEnd('/') -cne (
-            $packageContainerPath + '-results'
-        )) {
+        $segments.Count -lt 3 -or
+        $segments[1] -cne 'cluster-results' -or
+        -not $segments[-1].EndsWith('.zip', [StringComparison]::OrdinalIgnoreCase)) {
         throw [System.ArgumentException]::new(
-            'ResultsContainerUri must target the separate derived results container.'
+            'ResultsBlobUri must target a cluster-results/*.zip Blob in the package storage account.'
         )
     }
 
     Assert-UserDelegationSasQuery `
         -Query (Get-SasQueryValues -Uri $uri) `
-        -Resource 'c' `
+        -Resource 'b' `
         -Permissions 'c'
     return $uri.AbsoluteUri
 }
@@ -801,9 +798,9 @@ function Get-RefreshedPackageUri {
     }
     $configuration = Read-SyncRunnerJson -Path $path
     if (-not $configuration.ContainsKey('SchemaVersion') -or
-        [int]$configuration.SchemaVersion -ne 1 -or
+        [int]$configuration.SchemaVersion -ne 2 -or
         -not $configuration.ContainsKey('PackageUri') -or
-        -not $configuration.ContainsKey('ResultsContainerUri')) {
+        -not $configuration.ContainsKey('ResultsBlobUri')) {
         throw [IO.InvalidDataException]::new(
             "Package '$($script:PackageConfigName)' has an unsupported schema."
         )
@@ -818,7 +815,7 @@ function Get-RefreshedPackageUri {
         )
     }
     [void](Assert-ClusterResultsUri `
-        -Value ([string]$configuration.ResultsContainerUri) `
+        -Value ([string]$configuration.ResultsBlobUri) `
         -PackageUri $refreshed)
     return $refreshed
 }

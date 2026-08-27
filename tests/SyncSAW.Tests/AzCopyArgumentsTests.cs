@@ -113,6 +113,7 @@ public sealed class AzCopyArgumentsTests
         Assert.Equal(10, settings.AutoSyncIntervalSeconds);
         Assert.False(settings.PauseSync);
         Assert.False(settings.PublishClusterPackage);
+        Assert.Null(settings.ClusterResultsContainer);
     }
 
     [Fact]
@@ -141,24 +142,54 @@ public sealed class AzCopyArgumentsTests
     }
 
     [Fact]
-    public void AzureCliGenerateContainerCreateSas_UsesCreateOnlyContainerScope()
+    public void AzureCliGenerateBlobCreateSas_UsesCreateOnlyBlobScope()
     {
         var starts = DateTimeOffset.Parse("2026-08-27T01:00:00Z");
         var expires = starts.AddDays(7);
 
-        var arguments = AzCopyArguments.AzureCliGenerateContainerCreateSas(
+        var arguments = AzCopyArguments.AzureCliGenerateBlobCreateSas(
             "account123",
             "container",
+            "cluster-results/result.zip",
             starts,
             expires);
         var argumentArray = arguments.ToArray();
 
-        Assert.Equal(["storage", "container", "generate-sas"], arguments.Take(3));
+        Assert.Equal(["storage", "blob", "generate-sas"], arguments.Take(3));
         Assert.Equal("c", arguments[Array.IndexOf(argumentArray, "--permissions") + 1]);
+        Assert.Contains("cluster-results/result.zip", arguments);
         Assert.Contains("--https-only", arguments);
         Assert.Contains("--as-user", arguments);
-        Assert.DoesNotContain("--full-uri", arguments);
+        Assert.Contains("--full-uri", arguments);
         Assert.DoesNotContain("--account-key", arguments);
+    }
+
+    [Fact]
+    public void AzureCliCreatePrivateContainer_DisablesPublicAccessAtCreation()
+    {
+        var arguments = AzCopyArguments.AzureCliCreatePrivateContainer(
+            "account123",
+            "container-packages");
+        var argumentArray = arguments.ToArray();
+
+        Assert.Equal(["storage", "container", "create"], arguments.Take(3));
+        Assert.Contains("--public-access", arguments);
+        Assert.Equal("off", arguments[Array.IndexOf(argumentArray, "--public-access") + 1]);
+        Assert.Contains("--auth-mode", arguments);
+        Assert.Contains("login", arguments);
+    }
+
+    [Fact]
+    public void AzureCliGetContainerPublicAccess_UsesOAuthQuery()
+    {
+        var arguments = AzCopyArguments.AzureCliGetContainerPublicAccess(
+            "account123",
+            "container-packages");
+
+        Assert.Equal(["storage", "container", "show"], arguments.Take(3));
+        Assert.Contains("properties.publicAccess", arguments);
+        Assert.Contains("--auth-mode", arguments);
+        Assert.Contains("login", arguments);
     }
 
     [Fact]

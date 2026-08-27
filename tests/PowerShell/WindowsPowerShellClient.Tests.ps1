@@ -228,18 +228,18 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         $packageDirectory = New-Item -ItemType Directory `
             -Path (Join-Path $TestDrive 'package') -Force
         $current =
-            'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
+            'https://account123.blob.core.windows.net/sync-packages/cluster_package.zip' +
             $delegationSas.Replace('sig=test', 'sig=old')
         $next =
-            'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
+            'https://account123.blob.core.windows.net/sync-packages/cluster_package.zip' +
             $delegationSas.Replace('sig=test', 'sig=new')
         $results =
-            'https://account123.blob.core.windows.net/packages-results' +
-            $delegationSas.Replace('sp=r', 'sp=c').Replace('sr=b', 'sr=c')
+            'https://account123.blob.core.windows.net/sync/cluster-results/result.zip' +
+            $delegationSas.Replace('sp=r', 'sp=c')
         @{
-            SchemaVersion = 1
+            SchemaVersion = 2
             PackageUri = $next
-            ResultsContainerUri = $results
+            ResultsBlobUri = $results
         } | ConvertTo-Json | Set-Content `
             -LiteralPath (Join-Path $packageDirectory 'cluster_package.config') `
             -Encoding UTF8
@@ -249,9 +249,9 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             -CurrentPackageUri $current | Should -Be $next
 
         @{
-            SchemaVersion = 1
+            SchemaVersion = 2
             PackageUri = $next.Replace('account123', 'otheraccount')
-            ResultsContainerUri = $results
+            ResultsBlobUri = $results
         } | ConvertTo-Json | Set-Content `
             -LiteralPath (Join-Path $packageDirectory 'cluster_package.config') `
             -Encoding UTF8
@@ -262,13 +262,13 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         } | Should -Throw '*change the configured Blob endpoint*'
     }
 
-    It 'accepts only a create-only results SAS for the derived container' {
+    It 'accepts only a create-only SAS for one result ZIP Blob' {
         $package =
-            'https://account123.blob.core.windows.net/packages/cluster_package.zip' +
+            'https://account123.blob.core.windows.net/sync-packages/cluster_package.zip' +
             $delegationSas
         $results =
-            'https://account123.blob.core.windows.net/packages-results' +
-            $delegationSas.Replace('sp=r', 'sp=c').Replace('sr=b', 'sr=c')
+            'https://account123.blob.core.windows.net/sync/cluster-results/result.zip' +
+            $delegationSas.Replace('sp=r', 'sp=c')
 
         Assert-ClusterResultsUri -Value $results -PackageUri $package |
             Should -Be $results
@@ -279,9 +279,14 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         } | Should -Throw '*exact permissions*'
         {
             Assert-ClusterResultsUri `
-                -Value $results.Replace('/packages-results?', '/other?') `
+                -Value $results.Replace('sr=b', 'sr=c') `
                 -PackageUri $package
-        } | Should -Throw '*derived results container*'
+        } | Should -Throw '*exact permissions*'
+        {
+            Assert-ClusterResultsUri `
+                -Value $results.Replace('/cluster-results/', '/other/') `
+                -PackageUri $package
+        } | Should -Throw '*cluster-results*'
     }
 
     It 'compares bootstrap and runtime endpoints without considering SAS values' {

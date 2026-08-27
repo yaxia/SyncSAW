@@ -12,44 +12,14 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function New-ResultBlobUri {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$ContainerSasUri,
-        [Parameter(Mandatory)][string]$BlobPath
-    )
-
-    $normalized = $BlobPath.Replace('\', '/').TrimStart('/')
-    $segments = @($normalized.Split('/'))
-    if ([string]::IsNullOrWhiteSpace($normalized) -or
-        $segments -contains '.' -or
-        $segments -contains '..' -or
-        @($segments | Where-Object {
-            [string]::IsNullOrWhiteSpace($_)
-        }).Count -gt 0) {
-        throw [ArgumentException]::new('BlobPath must be a safe relative path.')
-    }
-
-    $container = [uri]$ContainerSasUri
-    $escapedPath = ($segments | ForEach-Object {
-        [uri]::EscapeDataString($_)
-    }) -join '/'
-    $builder = [UriBuilder]::new($container)
-    $builder.Path = $container.AbsolutePath.TrimEnd('/') + '/' + $escapedPath
-    return $builder.Uri.AbsoluteUri
-}
-
 function Send-TestResult {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$ContainerSasUri,
-        [Parameter(Mandatory)][string]$FilePath,
-        [Parameter(Mandatory)][string]$BlobPath
+        [Parameter(Mandatory)][string]$BlobSasUri,
+        [Parameter(Mandatory)][string]$FilePath
     )
 
-    $request = [Net.HttpWebRequest]::Create(
-        (New-ResultBlobUri -ContainerSasUri $ContainerSasUri -BlobPath $BlobPath)
-    )
+    $request = [Net.HttpWebRequest]::Create($BlobSasUri)
     $request.Method = 'PUT'
     $request.AllowAutoRedirect = $false
     $request.Timeout = 30000
@@ -57,6 +27,7 @@ function Send-TestResult {
     $request.Headers['x-ms-blob-type'] = 'BlockBlob'
     $request.Headers['x-ms-version'] = '2023-11-03'
     $request.Headers['If-None-Match'] = '*'
+    $request.ContentType = 'application/zip'
     $input = [IO.File]::OpenRead($FilePath)
     $output = $null
     $response = $null
@@ -98,9 +69,9 @@ function Send-TestResult {
 $configurationPath = Join-Path $PSScriptRoot 'cluster_package.config'
 $configuration = Get-Content -LiteralPath $configurationPath -Raw |
     ConvertFrom-Json -ErrorAction Stop
-if ([string]::IsNullOrWhiteSpace([string]$configuration.ResultsContainerUri)) {
+if ([string]::IsNullOrWhiteSpace([string]$configuration.ResultsBlobUri)) {
     throw [IO.InvalidDataException]::new(
-        'cluster_package.config does not contain ResultsContainerUri.'
+        'cluster_package.config does not contain ResultsBlobUri.'
     )
 }
 
@@ -116,17 +87,21 @@ if ($resultFiles.Count -eq 0) {
     )
 }
 
-$runId = '{0}-{1}' -f [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssZ'),
-    [guid]::NewGuid().ToString('N').Substring(0, 8)
-$machine = [regex]::Replace($env:COMPUTERNAME, '[^A-Za-z0-9._-]', '_')
-foreach ($file in $resultFiles) {
-    $relative = $file.FullName.Substring($resultRoot.Length).TrimStart(
-        [char[]]@('\', '/')
+$archivePath = Join-Path ([IO.Path]::GetTempPath()) (
+    'syncsaw-results-{0}.zip' -f [guid]::NewGuid().ToString('N')
+)
+try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::CreateFromDirectory(
+        $resultRoot,
+        $archivePath,
+        [IO.Compression.CompressionLevel]::Optimal,
+        $false
     )
-    $blobPath = 'test-results/{0}/{1}/{2}' -f $machine, $runId,
-        $relative.Replace('\', '/')
     Send-TestResult `
-        -ContainerSasUri ([string]$configuration.ResultsContainerUri) `
-        -FilePath $file.FullName `
-        -BlobPath $blobPath
+        -BlobSasUri ([string]$configuration.ResultsBlobUri) `
+        -FilePath $archivePath
+}
+finally {
+    Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
 }

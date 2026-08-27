@@ -663,12 +663,24 @@
                                       Margin="2,0,0,0"
                                       Checked="SettingsChanged"
                                       Unchecked="SettingsChanged"
-                                      Content="Publish cluster_package.zip every day"/>
+                                      Content="Publish cluster package on changes and daily"/>
                             <TextBlock Margin="22,5,0,0"
                                        Foreground="{DynamicResource MutedBrush}"
                                        FontSize="11"
                                        TextWrapping="Wrap"
-                                       Text="Packages the selected local folder and creates a separate results container with seven-day package-read and result-create SAS values. Requires Azure CLI / Windows broker authentication."/>
+                                       Text="Publishes to a private &lt;container&gt;-packages container. Test result ZIPs return to the monitored container by default."/>
+                            <TextBlock Margin="22,13,0,5"
+                                       FontWeight="SemiBold"
+                                       Text="Different results container (optional)"/>
+                            <TextBox x:Name="ClusterResultsContainerTextBox"
+                                     Margin="22,0,0,0"
+                                     CharacterCasing="Lower"
+                                     TextChanged="SettingsChanged"/>
+                            <TextBlock Margin="22,4,0,0"
+                                       Foreground="{DynamicResource MutedBrush}"
+                                       FontSize="11"
+                                       TextWrapping="Wrap"
+                                       Text="Leave blank so desktop and SAW sync download results. Set only when those copies are not needed."/>
 
                             <Separator Margin="0,18,0,13"
                                        Background="{DynamicResource BorderBrush}"/>

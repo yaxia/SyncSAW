@@ -252,22 +252,53 @@ PowerShell and .NET APIs: no PowerShell 7, Az modules, Azure CLI, AzCopy, accoun
 key, or interactive login is required on the cluster machine.
 
 The desktop app builds `cluster_package.zip` from the selected local folder.
-It excludes `.syncsaw`, `cluster_package.zip`, and `cluster_package.config`,
-adds a generated `cluster_package.config` containing a refreshed Blob-scoped
-read-only package SAS and a container-scoped create-only results SAS. The app
-creates a separate `<configured-container>-results` container and uploads the
-archive with the desktop user's Entra credential. Neither SAS can list, overwrite,
-or delete Blobs. When publishing is enabled, the first automatic
-synchronization cycle (or **Sync now**) publishes after pending transfers
-finish; later successful publications are spaced 24 hours apart. The delegation
-keys and SAS values each cover exactly seven days.
+It excludes `.syncsaw`, `cluster-results`, `cluster_package.zip`, and
+`cluster_package.config`, adds a generated `cluster_package.config`, and uploads
+the archive with the desktop user's Entra credential. The app creates
+`<configured-container>-packages` with public access disabled, verifies that
+setting through an OAuth-authenticated data-plane query, and refuses to publish
+if an existing package container is public. It stores `cluster_package.zip`
+there rather than in the normal sync container. Its Blob-scoped read-only SAS
+is known only to the desktop app and `Sync.ps1` through bootstrap/rollover
+configuration.
+
+Each package also contains a different Blob-scoped, create-only SAS for one
+exact `cluster-results/<id>.zip` result. By default that result Blob is in the
+normal container selected in the desktop app, so desktop and SAW synchronization
+download it quickly for analysis. Set **Different results container** only when
+the result does not need to be copied to the devbox and SAW. Neither SAS can
+list, overwrite, or delete Blobs.
+
+When publishing is enabled, the first automatic synchronization cycle (or
+**Sync now**) publishes after pending transfers finish. A changed package
+payload republishes on the next cycle; unchanged payloads are republished every
+24 hours to refresh both seven-day SAS values. A failed publication is retried
+after ten minutes; additional payload changes do not bypass that backoff.
+
+The private package-container and exact result-Blob contract uses package schema
+version 2 and is not compatible with the earlier container-wide result SAS.
+Perform a coordinated upgrade:
+
+1. Stop the cluster runner, or stop publishing the old package while it remains
+   unchanged.
+2. Replace each cluster machine's `Sync.ps1` with the current version. It
+   intentionally rejects schema version 1 packages.
+3. Enable the updated desktop publisher once so it creates
+   `<configured-container>-packages/cluster_package.zip`.
+4. Generate a new exact-Blob read-only bootstrap SAS for that Blob, replace
+   `PackageUri` in `Sync.config.json`, delete
+   `TaskExecutionRoot\.syncsaw-runtime.config`, and restart the runner.
+
+Do not leave an old runner polling the new package URI: it cannot validate the
+schema 2 result credential. Keep the package container private throughout the
+migration.
 
 Bootstrap each cluster machine by copying `Sync.ps1` and `Sync.config.json`,
 then place a valid full SAS URL for the package in `PackageUri`:
 
 ```json
 {
-  "PackageUri": "https://contosodata.blob.core.windows.net/packages/cluster_package.zip?sp=r&...",
+  "PackageUri": "https://contosodata.blob.core.windows.net/releases-packages/cluster_package.zip?sp=r&...",
   "TaskExecutionRoot": "C:\\ProgramData\\SyncSAW\\Tasks",
   "IntervalSeconds": 10
 }
@@ -286,7 +317,7 @@ $start = (Get-Date).ToUniversalTime().AddMinutes(-5)
 $expiry = $start.AddDays(7)
 az storage blob generate-sas `
   --account-name contosodata `
-  --container-name packages `
+  --container-name releases-packages `
   --name cluster_package.zip `
   --permissions r `
   --start $start.ToString('yyyy-MM-ddTHH:mm:ssZ') `
@@ -314,16 +345,36 @@ process and waits for the complete process lifetime; no Blob check occurs while
 it is running. A single-instance mutex prevents overlapping runners. Use
 `-Once` for one check.
 
-`run.ps1` reads the generated `ResultsContainerUri` from its adjacent
-`cluster_package.config` and uses that rotating SAS to upload results beneath a
-unique prefix such as `test-results/<machine>/<UTC-run-id>/` in the separate
-results container. It must never embed, persist, or log the SAS. Result uploads
-use create-only permission and `If-None-Match: *`, so a cluster cannot change a
-package, synchronization control record, or prior result. See
-`scripts\RUN-PS1.md` for the contract and `scripts\run.example.ps1` for a
-Windows PowerShell 5.1 Block Blob upload pattern. The configured container name
-must be 55 characters or fewer so the `-results` suffix remains a valid Azure
-container name.
+`run.ps1` writes all test artifacts beneath its local `test-results` directory,
+compresses that directory into one ZIP, and uploads only that archive to the
+generated `ResultsBlobUri` from adjacent `cluster_package.config`. It must never
+embed, persist, or log the SAS. The exact-Blob create permission and
+`If-None-Match: *` prevent a cluster from changing packages, synchronization
+control records, or prior results. See `scripts\RUN-PS1.md` for the contract and
+`scripts\run.example.ps1` for a Windows PowerShell 5.1 pattern. The selected
+sync container name must be 54 characters or fewer so `-packages` remains a
+valid Azure container suffix.
+
+### Coding-agent iteration loop
+
+The intended producer is a coding agent running on the same devbox as the
+desktop app. For each iteration, the agent should:
+
+1. Place `run.ps1`, required executables, test inputs, and supporting files in
+   the selected local folder. Do not put secrets in the payload.
+2. Let SyncSAW synchronize those changes and publish the new package to the
+   private package container. Payload changes trigger publication without
+   waiting for the daily SAS refresh.
+3. Wait for a new ZIP under the local `cluster-results` folder. The desktop app
+   downloads it from the normal sync container; the SAW script independently
+   receives the same archive.
+4. Extract and analyze the result ZIP, update the payload, and repeat until the
+   mission is complete.
+
+The package's `run.ps1` is responsible for executing the test workload and
+compressing all output into the single result ZIP. Use a different results
+container only when automatic devbox/SAW backup and analysis are intentionally
+not required.
 
 Rollover depends on the currently valid SAS being able to download a newer
 package. If the desktop publisher does not run for seven days, manually replace

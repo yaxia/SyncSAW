@@ -1,4 +1,6 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace SyncSAW.Core;
@@ -13,7 +15,8 @@ public static class ClusterPackage
     public const long MaximumPayloadBytes = 4L * 1024 * 1024 * 1024;
     // The runner's 10,000-entry archive limit includes the embedded config.
     public const int MaximumPayloadFiles = 9_999;
-    public const string ResultsContainerSuffix = "-results";
+    public const string PackageContainerSuffix = "-packages";
+    public const string ResultsPrefix = "cluster-results/";
 
     public static bool IsReservedPath(string path)
     {
@@ -22,26 +25,45 @@ public static class ClusterPackage
                normalized.Equals(ConfigurationEntryName, StringComparison.OrdinalIgnoreCase);
     }
 
-    public static string GetResultsContainerName(string packageContainer)
+    public static string GetPackageContainerName(string syncContainer)
     {
-        var normalized = StorageEndpoint.NormalizeContainer(packageContainer);
-        if (normalized.Length + ResultsContainerSuffix.Length > 63)
+        var normalized = StorageEndpoint.NormalizeContainer(syncContainer);
+        if (normalized.Length + PackageContainerSuffix.Length > 63)
         {
             throw new InvalidOperationException(
-                "Daily cluster package publishing requires a container name of 55 characters or fewer " +
-                $"so the separate '{ResultsContainerSuffix.TrimStart('-')}' container can be created.");
+                "Daily cluster package publishing requires a sync container name of 54 characters " +
+                $"or fewer so the private '{PackageContainerSuffix.TrimStart('-')}' container can be created.");
         }
-        return normalized + ResultsContainerSuffix;
+        return normalized + PackageContainerSuffix;
     }
+
+    public static string GetResultsContainerName(
+        string syncContainer,
+        string? configuredResultsContainer) =>
+        string.IsNullOrWhiteSpace(configuredResultsContainer)
+            ? StorageEndpoint.NormalizeContainer(syncContainer)
+            : StorageEndpoint.NormalizeContainer(configuredResultsContainer);
 }
 
 public sealed record ClusterPackagePublication(
     DateTimeOffset PublishedUtc,
     DateTimeOffset SasExpiresUtc,
-    int PayloadFileCount);
+    int PayloadFileCount,
+    string PayloadFingerprint);
 
 public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
 {
+    public string GetPayloadFingerprint(
+        string sourceRoot,
+        CancellationToken cancellationToken = default)
+    {
+        var root = Path.GetFullPath(sourceRoot);
+        return ComputePayloadFingerprint(
+            EnumeratePayloadFiles(root)
+                .OrderBy(item => item.RelativePath, StringComparer.OrdinalIgnoreCase),
+            cancellationToken);
+    }
+
     public async Task<ClusterPackagePublication> PublishAsync(
         SyncSettings settings,
         DateTimeOffset now,
@@ -55,19 +77,58 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                 "Daily cluster package publishing requires Azure CLI / Windows broker authentication.");
         }
 
+        var packageContainer = ClusterPackage.GetPackageContainerName(settings.Container);
+        var resultsContainer = ClusterPackage.GetResultsContainerName(
+            settings.Container,
+            settings.ClusterResultsContainer);
+        var resultBlobPath =
+            $"{ClusterPackage.ResultsPrefix}{now.UtcDateTime:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}.zip";
         var blobUri = StorageEndpoint.BuildBlobUri(
             settings.StorageAccount,
-            settings.Container,
+            packageContainer,
             ClusterPackage.BlobName);
-        var resultsContainer = ClusterPackage.GetResultsContainerName(settings.Container);
-        var expectedResultsContainerUri = StorageEndpoint.BuildContainerUri(
+        var expectedResultBlobUri = StorageEndpoint.BuildBlobUri(
             settings.StorageAccount,
-            resultsContainer);
+            resultsContainer,
+            resultBlobPath);
         var unroundedStart = now.UtcDateTime.AddMinutes(-5);
         var sasStartsUtc = new DateTimeOffset(
             unroundedStart.AddTicks(-(unroundedStart.Ticks % TimeSpan.TicksPerSecond)));
         var sasExpiresUtc = sasStartsUtc.Add(ClusterPackage.SasLifetime);
         var azureCli = AzureCliLocator.ResolveCommand(settings.AzureCliPath);
+        var createPackageContainer = await runner.RunAsync(
+            azureCli.ExecutablePath,
+            [
+                .. azureCli.PrefixArguments,
+                .. AzCopyArguments.AzureCliCreatePrivateContainer(
+                    settings.StorageAccount,
+                    packageContainer)
+            ],
+            cancellationToken);
+        EnsureSuccess(
+            $"Azure CLI could not create or validate package container '{packageContainer}'.",
+            createPackageContainer);
+        var packageContainerAccess = await runner.RunAsync(
+            azureCli.ExecutablePath,
+            [
+                .. azureCli.PrefixArguments,
+                .. AzCopyArguments.AzureCliGetContainerPublicAccess(
+                    settings.StorageAccount,
+                    packageContainer)
+            ],
+            cancellationToken);
+        EnsureSuccess(
+            $"Azure CLI could not verify package container '{packageContainer}' access.",
+            packageContainerAccess);
+        var publicAccess = packageContainerAccess.StandardOutput.Trim();
+        if (!string.IsNullOrEmpty(publicAccess) &&
+            !publicAccess.Equals("none", StringComparison.OrdinalIgnoreCase) &&
+            !publicAccess.Equals("null", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Package container '{packageContainer}' allows public '{publicAccess}' access. " +
+                "Disable public access before publishing cluster packages.");
+        }
         var createResultsContainer = await runner.RunAsync(
             azureCli.ExecutablePath,
             [
@@ -86,7 +147,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                 .. azureCli.PrefixArguments,
                 .. AzCopyArguments.AzureCliGenerateBlobReadSas(
                     settings.StorageAccount,
-                    settings.Container,
+                    packageContainer,
                     ClusterPackage.BlobName,
                     sasStartsUtc,
                     sasExpiresUtc)
@@ -105,9 +166,10 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
             azureCli.ExecutablePath,
             [
                 .. azureCli.PrefixArguments,
-                .. AzCopyArguments.AzureCliGenerateContainerCreateSas(
+                .. AzCopyArguments.AzureCliGenerateBlobCreateSas(
                     settings.StorageAccount,
                     resultsContainer,
+                    resultBlobPath,
                     sasStartsUtc,
                     sasExpiresUtc)
             ],
@@ -116,12 +178,10 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
         EnsureSuccess(
             "Azure CLI could not generate the cluster results upload SAS.",
             resultsSasResult);
-        var resultsContainerUri = ParseAndValidateSasUri(
-            CombineSasTokenWithResourceUri(
-                resultsSasResult.StandardOutput,
-                expectedResultsContainerUri),
-            expectedResultsContainerUri,
-            "c",
+        var resultsBlobUri = ParseAndValidateSasUri(
+            resultsSasResult.StandardOutput,
+            expectedResultBlobUri,
+            "b",
             "c",
             sasStartsUtc,
             sasExpiresUtc);
@@ -131,11 +191,11 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
             $"syncsaw-cluster-package-{Guid.NewGuid():N}.zip");
         try
         {
-            var payloadCount = await CreateArchiveAsync(
+            var payload = await CreateArchiveAsync(
                 settings.LocalFolder,
                 archivePath,
                 sasUri,
-                resultsContainerUri,
+                resultsBlobUri,
                 now.ToUniversalTime(),
                 sasExpiresUtc,
                 cancellationToken);
@@ -154,7 +214,8 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
             return new ClusterPackagePublication(
                 now.ToUniversalTime(),
                 sasExpiresUtc,
-                payloadCount);
+                payload.Count,
+                payload.Fingerprint);
         }
         finally
         {
@@ -162,17 +223,19 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
         }
     }
 
-    private static async Task<int> CreateArchiveAsync(
+    private static async Task<(int Count, string Fingerprint)> CreateArchiveAsync(
         string sourceRoot,
         string archivePath,
         Uri packageUri,
-        Uri resultsContainerUri,
+        Uri resultsBlobUri,
         DateTimeOffset issuedUtc,
         DateTimeOffset expiresUtc,
         CancellationToken cancellationToken)
     {
         var root = Path.GetFullPath(sourceRoot);
-        var payloadFiles = EnumeratePayloadFiles(root).ToArray();
+        var payloadFiles = EnumeratePayloadFiles(root)
+            .OrderBy(item => item.RelativePath, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         if (payloadFiles.Length > ClusterPackage.MaximumPayloadFiles)
         {
             throw new InvalidDataException(
@@ -185,6 +248,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                 $"The cluster package payload exceeds the " +
                 $"{ClusterPackage.MaximumPayloadBytes}-byte limit.");
         }
+        var payloadFingerprint = ComputePayloadFingerprint(payloadFiles, cancellationToken);
 
         using var archiveStream = new FileStream(
             archivePath,
@@ -212,16 +276,42 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                 configurationStream,
                 new
                 {
-                    SchemaVersion = 1,
+                    SchemaVersion = 2,
                     PackageUri = packageUri.AbsoluteUri,
-                    ResultsContainerUri = resultsContainerUri.AbsoluteUri,
+                    ResultsBlobUri = resultsBlobUri.AbsoluteUri,
                     IssuedUtc = issuedUtc,
                     ExpiresUtc = expiresUtc
                 },
                 new JsonSerializerOptions { WriteIndented = true });
         }
 
-        return payloadFiles.Length;
+        return (
+            payloadFiles.Length,
+            payloadFingerprint);
+    }
+
+    private static string ComputePayloadFingerprint(
+        IEnumerable<(string Path, string RelativePath)> payloadFiles,
+        CancellationToken cancellationToken)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[128 * 1024];
+        foreach (var (path, relativePath) in payloadFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var info = new FileInfo(path);
+            var descriptor =
+                $"{relativePath}\0{info.Length}\0{info.LastWriteTimeUtc.Ticks}\n";
+            hash.AppendData(Encoding.UTF8.GetBytes(descriptor));
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            int bytesRead;
+            while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                hash.AppendData(buffer, 0, bytesRead);
+            }
+        }
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     private static IEnumerable<(string Path, string RelativePath)> EnumeratePayloadFiles(string root)
@@ -238,7 +328,13 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                 var relative = Path.GetRelativePath(root, info.FullName).Replace('\\', '/');
                 if (info.Attributes.HasFlag(FileAttributes.ReparsePoint) ||
                     relative.Equals(".syncsaw", StringComparison.OrdinalIgnoreCase) ||
-                    relative.StartsWith(".syncsaw/", StringComparison.OrdinalIgnoreCase))
+                    relative.StartsWith(".syncsaw/", StringComparison.OrdinalIgnoreCase) ||
+                    relative.Equals(
+                        ClusterPackage.ResultsPrefix.TrimEnd('/'),
+                        StringComparison.OrdinalIgnoreCase) ||
+                    relative.StartsWith(
+                        ClusterPackage.ResultsPrefix,
+                        StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -255,7 +351,10 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                 }
 
                 var relative = Path.GetRelativePath(root, info.FullName).Replace('\\', '/');
-                if (!ClusterPackage.IsReservedPath(relative))
+                if (!ClusterPackage.IsReservedPath(relative) &&
+                    !relative.StartsWith(
+                        ClusterPackage.ResultsPrefix,
+                        StringComparison.OrdinalIgnoreCase))
                 {
                     yield return (info.FullName, relative);
                 }
@@ -318,25 +417,6 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
         }
 
         return uri;
-    }
-
-    private static string CombineSasTokenWithResourceUri(string output, Uri resourceUri)
-    {
-        var token = (output ?? string.Empty)
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .LastOrDefault();
-        if (string.IsNullOrWhiteSpace(token) ||
-            Uri.TryCreate(token, UriKind.Absolute, out _))
-        {
-            throw new InvalidDataException(
-                "Azure CLI returned an invalid cluster results SAS token.");
-        }
-
-        var builder = new UriBuilder(resourceUri)
-        {
-            Query = token.TrimStart('?')
-        };
-        return builder.Uri.AbsoluteUri;
     }
 
     private static Dictionary<string, string> ParseQuery(string query)
