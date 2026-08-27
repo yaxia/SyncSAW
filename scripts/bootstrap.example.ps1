@@ -1,5 +1,5 @@
 <#
-Copy this file to run.ps1 in the package root. Run the test workload in the
+Copy this file to bootstrap.ps1 in the package root. Run the test workload in the
 marked section and write result files beneath test-results. The upload helper
 reads its rotating SAS from cluster_package.config; do not embed or log a SAS.
 #>

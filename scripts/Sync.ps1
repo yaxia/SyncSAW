@@ -7,17 +7,17 @@ Sync.ps1 runs under 64-bit Windows PowerShell 5.1 as a local administrator. It
 checks a preconfigured HTTPS SAS URL for cluster_package.zip every 10 seconds.
 When Azure Blob Storage reports a newer package, the script downloads it,
 extracts it into a versioned task execution directory, adopts the refreshed
-read-only user delegation SAS from cluster_package.config, and runs run.ps1
+read-only user delegation SAS from cluster_package.config, and runs bootstrap.ps1
 synchronously when that file exists.
 
-The package check is suspended for the full lifetime of run.ps1. The script
+The package check is suspended for the full lifetime of bootstrap.ps1. The script
 does not require Az modules, Azure CLI, AzCopy, storage keys, or an Entra login.
 
 .EXAMPLE
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File .\Sync.ps1
 
 .EXAMPLE
-.\Sync.ps1 -ConfigPath C:\ProgramData\SyncSAW\Sync.config.json -Once
+.\Sync.ps1 -ConfigPath .\Sync.config.json -Once
 #>
 
 #requires -Version 5.1
@@ -44,8 +44,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:RunnerBoundParameters = @{} + $PSBoundParameters
+$script:RunnerScriptRoot = $PSScriptRoot
 $script:PackageBlobName = 'cluster_package.zip'
 $script:PackageConfigName = 'cluster_package.config'
+$script:PackageBootstrapName = 'bootstrap.ps1'
 $script:StateFileName = '.syncsaw-package-state.json'
 $script:RuntimeConfigFileName = '.syncsaw-runtime.config'
 $script:LogFileName = 'syncsaw-package-runner.log'
@@ -334,9 +336,7 @@ function Resolve-SyncRunnerConfiguration {
         -Value ([string]$configuration.PackageUri)
     if (-not $configuration.ContainsKey('TaskExecutionRoot') -or
         [string]::IsNullOrWhiteSpace([string]$configuration.TaskExecutionRoot)) {
-        $configuration.TaskExecutionRoot = Join-Path (
-            Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SyncSAW'
-        ) 'Tasks'
+        $configuration.TaskExecutionRoot = $script:RunnerScriptRoot
     }
     $configuration.TaskExecutionRoot = [IO.Path]::GetFullPath(
         [Environment]::ExpandEnvironmentVariables(
@@ -453,9 +453,7 @@ function Initialize-SecureExecutionRoot {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
 
-    $trustedParent = [IO.Path]::GetFullPath(
-        (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SyncSAW')
-    )
+    $trustedParent = [IO.Path]::GetFullPath($script:RunnerScriptRoot)
     $requested = [IO.Path]::GetFullPath($Path)
     $trustedPrefix = $trustedParent.TrimEnd('\') + '\'
     if (-not $requested.Equals(
@@ -798,7 +796,7 @@ function Get-RefreshedPackageUri {
     }
     $configuration = Read-SyncRunnerJson -Path $path
     if (-not $configuration.ContainsKey('SchemaVersion') -or
-        [int]$configuration.SchemaVersion -ne 2 -or
+        [int]$configuration.SchemaVersion -ne 3 -or
         -not $configuration.ContainsKey('PackageUri') -or
         -not $configuration.ContainsKey('ResultsBlobUri')) {
         throw [IO.InvalidDataException]::new(
@@ -848,9 +846,9 @@ function Install-ClusterPackage {
         $refreshedUri = Get-RefreshedPackageUri `
             -PackageDirectory $stagingPath `
             -CurrentPackageUri $PackageUri
-        $stagedRunScript = Join-Path $stagingPath 'run.ps1'
-        if (Test-Path -LiteralPath $stagedRunScript -PathType Leaf) {
-            [void](Assert-RunScriptSafety -Path $stagedRunScript)
+        $stagedBootstrapScript = Join-Path $stagingPath $script:PackageBootstrapName
+        if (Test-Path -LiteralPath $stagedBootstrapScript -PathType Leaf) {
+            [void](Assert-BootstrapScriptSafety -Path $stagedBootstrapScript)
         }
         $versionName = '{0}-{1}' -f `
             ([DateTimeOffset]$downloadedMetadata.LastModifiedUtc).ToString('yyyyMMddHHmmss'),
@@ -878,17 +876,17 @@ function Install-ClusterPackage {
     }
 }
 
-function Invoke-ClusterPackageRun {
+function Invoke-ClusterPackageBootstrap {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$PackageDirectory)
 
-    $runScript = Join-Path $PackageDirectory 'run.ps1'
-    if (-not (Test-Path -LiteralPath $runScript -PathType Leaf)) {
+    $bootstrapScript = Join-Path $PackageDirectory $script:PackageBootstrapName
+    if (-not (Test-Path -LiteralPath $bootstrapScript -PathType Leaf)) {
         return $null
     }
-    [void](Assert-RunScriptSafety -Path $runScript)
+    [void](Assert-BootstrapScriptSafety -Path $bootstrapScript)
     $argumentList = '-NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "{0}"' -f `
-        $runScript.Replace('"', '""')
+        $bootstrapScript.Replace('"', '""')
     return Start-Process `
         -FilePath (Join-Path $PSHOME 'powershell.exe') `
         -ArgumentList $argumentList `
@@ -897,7 +895,7 @@ function Invoke-ClusterPackageRun {
         -PassThru
 }
 
-function Assert-RunScriptSafety {
+function Assert-BootstrapScriptSafety {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -908,7 +906,7 @@ function Assert-RunScriptSafety {
     $fullPath = [IO.Path]::GetFullPath($Path)
     if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
         throw [IO.FileNotFoundException]::new(
-            "The run script was not found: '$fullPath'.",
+            "The bootstrap script was not found: '$fullPath'.",
             $fullPath
         )
     }
@@ -923,7 +921,7 @@ function Assert-RunScriptSafety {
     if ($parseErrors.Count -gt 0) {
         $messages = @($parseErrors | ForEach-Object { $_.Message }) -join '; '
         throw [IO.InvalidDataException]::new(
-            "run.ps1 contains PowerShell parse errors: $messages"
+            "bootstrap.ps1 contains PowerShell parse errors: $messages"
         )
     }
 
@@ -1142,7 +1140,7 @@ function Assert-RunScriptSafety {
 
     if ($violations.Count -gt 0) {
         throw [Security.SecurityException]::new(
-            "run.ps1 failed the additive-only safety harness:`r`n- " +
+            "bootstrap.ps1 failed the additive-only safety harness:`r`n- " +
             ($violations -join "`r`n- ")
         )
     }
@@ -1293,15 +1291,15 @@ function Invoke-SyncRunner {
                     $configuration.PackageUri = $installed.PackageUri
                     Write-SyncRunnerLog -Root $root `
                         -Message "Installed package '$($installed.PackageDirectory)'."
-                    $process = Invoke-ClusterPackageRun `
+                    $bootstrapProcess = Invoke-ClusterPackageBootstrap `
                         -PackageDirectory $installed.PackageDirectory
-                    if ($null -ne $process) {
+                    if ($null -ne $bootstrapProcess) {
                         Write-SyncRunnerLog -Root $root `
-                            -Message "run.ps1 exited with code $($process.ExitCode)."
+                            -Message "bootstrap.ps1 exited with code $($bootstrapProcess.ExitCode)."
                     }
                     else {
                         Write-SyncRunnerLog -Root $root `
-                            -Message 'Package has no run.ps1; execution was skipped.'
+                            -Message 'Package has no bootstrap.ps1; execution was skipped.'
                     }
                     Save-SyncRunnerJson `
                         -Path $statePath `
@@ -1312,11 +1310,11 @@ function Invoke-SyncRunner {
                                 [DateTimeOffset]$installed.Metadata.LastModifiedUtc
                             ).ToUniversalTime().ToString('O')
                             PackageDirectory = $installed.PackageDirectory
-                            RunExitCode = if ($null -eq $process) {
+                            BootstrapExitCode = if ($null -eq $bootstrapProcess) {
                                 $null
                             }
                             else {
-                                [int]$process.ExitCode
+                                [int]$bootstrapProcess.ExitCode
                             }
                             CompletedUtc = [DateTimeOffset]::UtcNow.ToString('O')
                         }

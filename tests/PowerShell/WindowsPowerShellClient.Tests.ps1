@@ -3,7 +3,7 @@ Describe 'Windows PowerShell 5.1 cluster package runner' {
         $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
         $runnerPath = Join-Path $repoRoot 'scripts\Sync.ps1'
         $sawPath = Join-Path $repoRoot 'scripts\Sync-SAW.ps1'
-        $runExamplePath = Join-Path $repoRoot 'scripts\run.example.ps1'
+        $bootstrapExamplePath = Join-Path $repoRoot 'scripts\bootstrap.example.ps1'
         $installerPath = Join-Path $repoRoot 'scripts\Install-WindowsPowerShellDependencies.ps1'
         $delegationSas =
             '?sp=r&spr=https&se=2099-01-01T00%3A00%3A00Z&sr=b' +
@@ -23,8 +23,8 @@ $failed = $false
 foreach ($relativePath in @(
     'scripts\Sync-SAW.ps1',
     'scripts\Sync.ps1',
-    'scripts\run.example.ps1',
-    'scripts\Test-RunScriptSafety.ps1',
+    'scripts\bootstrap.example.ps1',
+    'scripts\Test-BootstrapScriptSafety.ps1',
     'scripts\Install-WindowsPowerShellDependencies.ps1'
 )) {
     $path = Join-Path $RepoRoot $relativePath
@@ -104,9 +104,9 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         $commands | Should -Not -Contain 'azcopy'
     }
 
-    It 'accepts the additive-only run.ps1 example' {
-        Assert-RunScriptSafety -Path $runExamplePath |
-            Should -Be ([IO.Path]::GetFullPath($runExamplePath))
+    It 'accepts the additive-only bootstrap.ps1 example' {
+        Assert-BootstrapScriptSafety -Path $bootstrapExamplePath |
+            Should -Be ([IO.Path]::GetFullPath($bootstrapExamplePath))
     }
 
     It 'rejects destructive, overwrite, restart, cloud, and dynamic operations' {
@@ -130,7 +130,7 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             $unsafeScripts[$index] |
                 Set-Content -LiteralPath $path -Encoding UTF8
 
-            { Assert-RunScriptSafety -Path $path } |
+            { Assert-BootstrapScriptSafety -Path $path } |
                 Should -Throw '*failed the additive-only safety harness*'
         }
     }
@@ -167,7 +167,7 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         }
     }
 
-    It 'defaults task execution to the secured ProgramData hierarchy' {
+    It 'defaults task execution to the Sync.ps1 directory' {
         $configurationPath = Join-Path $TestDrive 'minimal.config.json'
         @{
             PackageUri = (
@@ -179,11 +179,19 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         $configuration = Resolve-SyncRunnerConfiguration `
             -Path $configurationPath `
             -Overrides @{}
-        $expectedRoot = Join-Path (
-            Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SyncSAW'
-        ) 'Tasks'
+        $expectedRoot = [IO.Path]::GetFullPath(
+            (Split-Path -Parent $runnerPath)
+        )
 
         $configuration.TaskExecutionRoot | Should -Be $expectedRoot
+    }
+
+    It 'rejects task execution outside the Sync.ps1 directory' {
+        $outsideRoot = Join-Path $TestDrive 'outside'
+
+        {
+            Initialize-SecureExecutionRoot -Path $outsideRoot
+        } | Should -Throw '*TaskExecutionRoot must be*'
     }
 
     It 'requires a strictly newer Blob timestamp and treats a matching ETag as current' {
@@ -225,7 +233,7 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             $stream,
             [IO.Compression.ZipArchiveMode]::Create
         )
-        $entry = $archive.CreateEntry('folder/run.ps1')
+        $entry = $archive.CreateEntry('folder/bootstrap.ps1')
         $writer = [IO.StreamWriter]::new($entry.Open())
         $writer.Write('exit 0')
         $writer.Dispose()
@@ -233,7 +241,7 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         $stream.Dispose()
 
         Expand-ClusterPackageSafely -ArchivePath $safeArchive -Destination $safeOutput
-        Test-Path -LiteralPath (Join-Path $safeOutput 'folder\run.ps1') |
+        Test-Path -LiteralPath (Join-Path $safeOutput 'folder\bootstrap.ps1') |
             Should -BeTrue
 
         $unsafeArchive = Join-Path $TestDrive 'unsafe.zip'
@@ -270,7 +278,7 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             'https://account123.blob.core.windows.net/sync/cluster-results/result.zip' +
             $delegationSas.Replace('sp=r', 'sp=c')
         @{
-            SchemaVersion = 2
+            SchemaVersion = 3
             PackageUri = $next
             ResultsBlobUri = $results
         } | ConvertTo-Json | Set-Content `
@@ -283,6 +291,19 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
 
         @{
             SchemaVersion = 2
+            PackageUri = $next
+            ResultsBlobUri = $results
+        } | ConvertTo-Json | Set-Content `
+            -LiteralPath (Join-Path $packageDirectory 'cluster_package.config') `
+            -Encoding UTF8
+        {
+            Get-RefreshedPackageUri `
+                -PackageDirectory $packageDirectory `
+                -CurrentPackageUri $current
+        } | Should -Throw '*unsupported schema*'
+
+        @{
+            SchemaVersion = 3
             PackageUri = $next.Replace('account123', 'otheraccount')
             ResultsBlobUri = $results
         } | ConvertTo-Json | Set-Content `
@@ -346,19 +367,23 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         )
         $content | Should -Match $ifMatchAssignment
         $stagedHarnessIndex = $content.IndexOf(
-            '[void](Assert-RunScriptSafety -Path $stagedRunScript)'
+            '[void](Assert-BootstrapScriptSafety -Path $stagedBootstrapScript)'
         )
         $installMoveIndex = $content.IndexOf('[IO.Directory]::Move($stagingPath')
-        $runIndex = $content.IndexOf('$process = Invoke-ClusterPackageRun')
-        $harnessIndex = $content.IndexOf('[void](Assert-RunScriptSafety -Path $runScript)')
+        $bootstrapIndex = $content.IndexOf(
+            '$bootstrapProcess = Invoke-ClusterPackageBootstrap'
+        )
+        $harnessIndex = $content.IndexOf(
+            '[void](Assert-BootstrapScriptSafety -Path $bootstrapScript)'
+        )
         $startIndex = $content.IndexOf('return Start-Process', $harnessIndex)
-        $completedStateIndex = $content.IndexOf('RunExitCode = if')
+        $completedStateIndex = $content.IndexOf('BootstrapExitCode = if')
         $stagedHarnessIndex | Should -BeGreaterThan -1
         $installMoveIndex | Should -BeGreaterThan $stagedHarnessIndex
-        $runIndex | Should -BeGreaterThan -1
+        $bootstrapIndex | Should -BeGreaterThan -1
         $harnessIndex | Should -BeGreaterThan -1
         $startIndex | Should -BeGreaterThan $harnessIndex
-        $completedStateIndex | Should -BeGreaterThan $runIndex
+        $completedStateIndex | Should -BeGreaterThan $bootstrapIndex
         $content | Should -Match 'Initialize-SecureDirectory'
         $content | Should -Match 'Assert-NoReparsePointInPath'
         $content | Should -Match 'SetAccessRuleProtection\(\$true, \$false\)'

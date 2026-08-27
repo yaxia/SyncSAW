@@ -1,7 +1,7 @@
 # SyncSAW agent safety harness
 
 These rules apply to every agent that creates, edits, packages, or validates a
-cluster `run.ps1`.
+cluster `bootstrap.ps1`.
 
 ## Devbox restrictions
 
@@ -13,7 +13,7 @@ cluster `run.ps1`.
 - Validate with builds, unit tests, local static checks, and newly named local
   files. Leave the running desktop app and existing cloud data untouched.
 
-## Generated `run.ps1` restrictions
+## Generated `bootstrap.ps1` restrictions
 
 - Treat the cluster node as immutable. Do not restart, shut down, stop, drain,
   reimage, or reconfigure the node or its services.
@@ -31,7 +31,7 @@ cluster `run.ps1`.
 
   ```powershell
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
-    .\scripts\Test-RunScriptSafety.ps1 -Path <path-to-run.ps1>
+    .\scripts\Test-BootstrapScriptSafety.ps1 -Path <path-to-bootstrap.ps1>
   ```
 
 The cluster runner applies the same static check immediately before execution.

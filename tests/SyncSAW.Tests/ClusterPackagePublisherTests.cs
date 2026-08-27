@@ -35,7 +35,9 @@ public sealed class ClusterPackagePublisherTests
         var directory = Directory.CreateTempSubdirectory("SyncSAW.ClusterPackage.");
         try
         {
-            await File.WriteAllTextAsync(Path.Combine(directory.FullName, "run.ps1"), "exit 0");
+            await File.WriteAllTextAsync(
+                Path.Combine(directory.FullName, ClusterPackage.BootstrapScriptName),
+                "exit 0");
             var publisher = new ClusterPackagePublisher(new PackageRunner(
                 string.Empty,
                 DateTimeOffset.UtcNow,
@@ -77,7 +79,9 @@ public sealed class ClusterPackagePublisherTests
         try
         {
             var source = Directory.CreateDirectory(Path.Combine(directory.FullName, "source"));
-            await File.WriteAllTextAsync(Path.Combine(source.FullName, "run.ps1"), "exit 0");
+            await File.WriteAllTextAsync(
+                Path.Combine(source.FullName, ClusterPackage.BootstrapScriptName),
+                "exit 0");
             Directory.CreateDirectory(Path.Combine(source.FullName, "data"));
             await File.WriteAllTextAsync(
                 Path.Combine(source.FullName, "data", "payload.txt"),
@@ -96,6 +100,9 @@ public sealed class ClusterPackagePublisherTests
             await File.WriteAllTextAsync(
                 Path.Combine(source.FullName, "cluster-results", "old.zip"),
                 "old result");
+            var pdiDirectory = Directory.CreateDirectory(Path.Combine(source.FullName, "PDITest"));
+            await File.WriteAllTextAsync(Path.Combine(pdiDirectory.FullName, "PDI.zip"), "PDI");
+            await File.WriteAllTextAsync(Path.Combine(pdiDirectory.FullName, "spdi.zip"), "SPDI");
 
             var now = DateTimeOffset.Parse("2026-08-27T05:04:03.456Z");
             var expectedStart = DateTimeOffset.Parse("2026-08-27T04:59:03Z");
@@ -170,17 +177,21 @@ public sealed class ClusterPackagePublisherTests
 
             using var archive = ZipFile.OpenRead(capturedArchive);
             var names = archive.Entries.Select(entry => entry.FullName).ToArray();
-            Assert.Contains("run.ps1", names);
+            Assert.Contains(ClusterPackage.BootstrapScriptName, names);
             Assert.Contains("data/payload.txt", names);
             Assert.Contains(ClusterPackage.ConfigurationEntryName, names);
             Assert.DoesNotContain(".syncsaw/private.txt", names);
             Assert.DoesNotContain("cluster-results/old.zip", names);
+            Assert.DoesNotContain("PDITest/PDI.zip", names);
+            Assert.DoesNotContain("PDITest/spdi.zip", names);
             Assert.Equal(1, names.Count(name =>
                 name.Equals(ClusterPackage.ConfigurationEntryName, StringComparison.OrdinalIgnoreCase)));
             var configEntry = Assert.Single(archive.Entries.Where(entry =>
                 entry.FullName == ClusterPackage.ConfigurationEntryName));
             using var config = JsonDocument.Parse(configEntry.Open());
-            Assert.Equal(2, config.RootElement.GetProperty("SchemaVersion").GetInt32());
+            Assert.Equal(
+                ClusterPackage.ConfigurationSchemaVersion,
+                config.RootElement.GetProperty("SchemaVersion").GetInt32());
             Assert.Equal(
                 sasUri,
                 config.RootElement.GetProperty("PackageUri").GetString());

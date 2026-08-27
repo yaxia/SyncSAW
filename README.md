@@ -259,8 +259,10 @@ key, or interactive login is required on the cluster machine.
 
 The desktop app builds `cluster_package.zip` from the selected local folder.
 It excludes `.syncsaw`, `cluster-results`, `cluster_package.zip`, and
-`cluster_package.config`, adds a generated `cluster_package.config`, and uploads
-the archive with the desktop user's Entra credential. The app creates
+`cluster_package.config`. It also excludes `PDITest/PDI.zip` and
+`PDITest/spdi.zip` because cluster machines provide those datasets locally.
+The app adds a generated `cluster_package.config` and uploads the archive with
+the desktop user's Entra credential. The app creates
 `<configured-container>-packages` with public access disabled, verifies that
 setting through an OAuth-authenticated data-plane query, and refuses to publish
 if an existing package container is public. It stores `cluster_package.zip`
@@ -281,23 +283,23 @@ payload republishes on the next cycle; unchanged payloads are republished every
 24 hours to refresh both seven-day SAS values. A failed publication is retried
 after ten minutes; additional payload changes do not bypass that backoff.
 
-The private package-container and exact result-Blob contract uses package schema
-version 2 and is not compatible with the earlier container-wide result SAS.
+The private package-container, exact result-Blob, and `bootstrap.ps1` entrypoint
+contract uses package schema version 3.
 Perform a coordinated upgrade:
 
 1. Stop the cluster runner, or stop publishing the old package while it remains
    unchanged.
 2. Replace each cluster machine's `Sync.ps1` with the current version. It
-   intentionally rejects schema version 1 packages.
+   intentionally rejects schema versions 1 and 2.
 3. Enable the updated desktop publisher once so it creates
    `<configured-container>-packages/cluster_package.zip`.
 4. Generate a new exact-Blob read-only bootstrap SAS for that Blob, replace
    `PackageUri` in `Sync.config.json`, delete
    `TaskExecutionRoot\.syncsaw-runtime.config`, and restart the runner.
 
-Do not leave an old runner polling the new package URI: it cannot validate the
-schema 2 result credential. Keep the package container private throughout the
-migration.
+Do not leave an old runner polling the new package URI: schema version 2 expects
+`run.ps1` and cannot execute the renamed entrypoint. Keep the package container
+private throughout the migration.
 
 Bootstrap each cluster machine by copying `Sync.ps1` and `Sync.config.json`,
 then place a valid full SAS URL for the package in `PackageUri`:
@@ -305,15 +307,14 @@ then place a valid full SAS URL for the package in `PackageUri`:
 ```json
 {
   "PackageUri": "https://contosodata.blob.core.windows.net/releases-packages/cluster_package.zip?sp=r&...",
-  "TaskExecutionRoot": "C:\\ProgramData\\SyncSAW\\Tasks",
   "IntervalSeconds": 10
 }
 ```
 
-For privileged execution safety, `TaskExecutionRoot` must be
-`C:\ProgramData\SyncSAW` or a subdirectory. The runner rejects network/removable
-drives and reparse points, and protects each directory it uses with
-Administrators/SYSTEM-only ACLs.
+`TaskExecutionRoot` defaults to the directory containing `Sync.ps1`. When
+explicitly configured, it must be that directory or one of its subdirectories.
+The runner rejects network/removable drives and reparse points, and protects
+each directory it uses with Administrators/SYSTEM-only ACLs.
 
 The bootstrap SAS must be an HTTPS-only, Blob-scoped, read-only user delegation
 SAS. One way to create it from the signed-in management computer is:
@@ -344,20 +345,20 @@ downloads only when the Blob Last Modified time is strictly newer than the
 installed version, limits archive size and entry count, blocks ZIP path
 traversal, secures `TaskExecutionRoot` so that only Administrators and SYSTEM
 can write it, extracts into a new versioned directory, and records a package as
-current only after `run.ps1` starts and finishes. It validates that the embedded
+current only after `bootstrap.ps1` starts and finishes. It validates that the embedded
 rollover SAS still targets the same Blob before saving it outside the package.
-If a root `run.ps1` exists, the runner launches it in a child Windows PowerShell
+If a root `bootstrap.ps1` exists, the runner launches it in a child Windows PowerShell
 process and waits for the complete process lifetime; no Blob check occurs while
 it is running. A single-instance mutex prevents overlapping runners. Use
 `-Once` for one check.
 
-`run.ps1` writes all test artifacts beneath its local `test-results` directory,
+`bootstrap.ps1` writes all test artifacts beneath its local `test-results` directory,
 compresses that directory into one ZIP, and uploads only that archive to the
 generated `ResultsBlobUri` from adjacent `cluster_package.config`. It must never
 embed, persist, or log the SAS. The exact-Blob create permission and
 `If-None-Match: *` prevent a cluster from changing packages, synchronization
-control records, or prior results. See `scripts\RUN-PS1.md` for the contract and
-`scripts\run.example.ps1` for a Windows PowerShell 5.1 pattern. The selected
+control records, or prior results. See `scripts\BOOTSTRAP-PS1.md` for the contract and
+`scripts\bootstrap.example.ps1` for a Windows PowerShell 5.1 pattern. The selected
 sync container name must be 54 characters or fewer so `-packages` remains a
 valid Azure container suffix.
 
@@ -366,7 +367,7 @@ valid Azure container suffix.
 The intended producer is a coding agent running on the same devbox as the
 desktop app. For each iteration, the agent should:
 
-1. Place `run.ps1`, required executables, test inputs, and supporting files in
+1. Place `bootstrap.ps1`, required executables, test inputs, and supporting files in
    the selected local folder. Do not put secrets in the payload.
 2. Let SyncSAW synchronize those changes and publish the new package to the
    private package container. Payload changes trigger publication without
@@ -377,26 +378,26 @@ desktop app. For each iteration, the agent should:
 4. Extract and analyze the result ZIP, update the payload, and repeat until the
    mission is complete.
 
-The package's `run.ps1` is responsible for executing the test workload and
+The package's `bootstrap.ps1` is responsible for executing the test workload and
 compressing all output into the single result ZIP. Use a different results
 container only when automatic devbox/SAW backup and analysis are intentionally
 not required.
 
-Agents generating or validating `run.ps1` must follow the repository
+Agents generating or validating `bootstrap.ps1` must follow the repository
 `AGENTS.md` safety harness. They must not restart or kill the SyncSAW desktop
 app, restart the devbox, or delete cloud Blobs for validation. Generated
-`run.ps1` files must treat the cluster node as immutable and create new files
+`bootstrap.ps1` files must treat the cluster node as immutable and create new files
 only: no deletion, overwrite, truncation, append, rename, move, permission
 change, process/service/node restart, dynamic shell, or cloud delete. Run
-`scripts\Test-RunScriptSafety.ps1` before packaging; `Sync.ps1` runs the same
-check again before execution. See `scripts\RUN-PS1.md` for the complete
+`scripts\Test-BootstrapScriptSafety.ps1` before packaging; `Sync.ps1` runs the same
+check again before execution. See `scripts\BOOTSTRAP-PS1.md` for the complete
 contract and limitations.
 
 Rollover depends on the currently valid SAS being able to download a newer
 package. If the desktop publisher does not run for seven days, manually replace
 the bootstrap `PackageUri` and delete
 `TaskExecutionRoot\.syncsaw-runtime.config`. Anyone allowed to replace
-`cluster_package.zip` can cause `run.ps1` to execute as local administrator;
+`cluster_package.zip` can cause `bootstrap.ps1` to execute as local administrator;
 use a dedicated storage account/container, tightly restrict Blob write RBAC,
 and treat package publishing access as privileged code-deployment access.
 

@@ -1,6 +1,6 @@
-# `run.ps1` package contract
+# `bootstrap.ps1` package contract
 
-Place `run.ps1` at the root of the folder published as `cluster_package.zip`.
+Place `bootstrap.ps1` at the root of the folder published as `cluster_package.zip`.
 The cluster runner starts it with 64-bit Windows PowerShell 5.1, sets its
 working directory to the extracted package root, waits for it to exit, and does
 not poll for another package while it is running. Before execution, the runner
@@ -10,7 +10,7 @@ The adjacent generated `cluster_package.config` contains:
 
 ```json
 {
-  "SchemaVersion": 2,
+  "SchemaVersion": 3,
   "PackageUri": "https://.../cluster_package.zip?<read-only-SAS>",
   "ResultsBlobUri": "https://.../<results-container>/cluster-results/<id>.zip?<create-only-SAS>",
   "IssuedUtc": "...",
@@ -18,11 +18,11 @@ The adjacent generated `cluster_package.config` contains:
 }
 ```
 
-Schema version 2 is required. It replaces the schema version 1
-container-scoped result credential with one exact create-only result Blob; old
-cluster runners must be upgraded before they are pointed at this package.
+Schema version 3 is required. It changes the package entrypoint from `run.ps1`
+to `bootstrap.ps1`; schema version 2 runners must be upgraded before they are
+pointed at this package.
 
-`run.ps1` must read `ResultsBlobUri` from
+`bootstrap.ps1` must read `ResultsBlobUri` from
 `Join-Path $PSScriptRoot 'cluster_package.config'` whenever it uploads test
 results. Never accept the SAS as a source-code constant, copy it into another
 file, print it, or include it in an exception. The URL is a rotating seven-day, HTTPS-only, Blob-scoped user delegation SAS
@@ -37,21 +37,21 @@ The desktop setting **Different results container** opts out of that replication
 Write all test artifacts beneath `test-results` in the extracted package, then
 compress that directory into one ZIP and upload it to the exact
 `ResultsBlobUri` as a Block Blob. Send `If-None-Match: *` so an existing result
-cannot be replaced. See `run.example.ps1` for the Windows PowerShell
+cannot be replaced. See `bootstrap.example.ps1` for the Windows PowerShell
 5.1-compatible pattern.
 
 ## Safety harness
 
-An agent creating or validating `run.ps1` must not restart the SyncSAW desktop
+An agent creating or validating `bootstrap.ps1` must not restart the SyncSAW desktop
 app, restart the devbox, or delete cloud Blobs. Use local builds, tests, and the
 static harness instead:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
-  .\scripts\Test-RunScriptSafety.ps1 -Path <path-to-run.ps1>
+  .\scripts\Test-BootstrapScriptSafety.ps1 -Path <path-to-bootstrap.ps1>
 ```
 
-`run.ps1` must treat the cluster node as immutable. It may create only new,
+`bootstrap.ps1` must treat the cluster node as immutable. It may create only new,
 uniquely named files beneath a newly created `test-results` directory. It must
 not delete, overwrite, truncate, append to, rename, move, or change permissions
 on existing files; restart or stop the node, services, or processes; invoke a

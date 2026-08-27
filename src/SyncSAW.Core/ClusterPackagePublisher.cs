@@ -9,6 +9,8 @@ public static class ClusterPackage
 {
     public const string BlobName = "cluster_package.zip";
     public const string ConfigurationEntryName = "cluster_package.config";
+    public const string BootstrapScriptName = "bootstrap.ps1";
+    public const int ConfigurationSchemaVersion = 3;
     public static readonly TimeSpan PublishInterval = TimeSpan.FromDays(1);
     public static readonly TimeSpan SasLifetime = TimeSpan.FromDays(7);
     public const long MaximumArchiveBytes = 2L * 1024 * 1024 * 1024;
@@ -17,12 +19,24 @@ public static class ClusterPackage
     public const int MaximumPayloadFiles = 9_999;
     public const string PackageContainerSuffix = "-packages";
     public const string ResultsPrefix = "cluster-results/";
+    private static readonly HashSet<string> ExcludedPayloadPaths =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "PDITest/PDI.zip",
+            "PDITest/spdi.zip"
+        };
 
     public static bool IsReservedPath(string path)
     {
         var normalized = (path ?? string.Empty).Trim().Trim('"').Replace('\\', '/').TrimStart('/');
         return normalized.Equals(BlobName, StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals(ConfigurationEntryName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsExcludedPayloadPath(string path)
+    {
+        var normalized = (path ?? string.Empty).Trim().Trim('"').Replace('\\', '/').TrimStart('/');
+        return ExcludedPayloadPaths.Contains(normalized);
     }
 
     public static string GetPackageContainerName(string syncContainer)
@@ -276,7 +290,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                 configurationStream,
                 new
                 {
-                    SchemaVersion = 2,
+                    SchemaVersion = ClusterPackage.ConfigurationSchemaVersion,
                     PackageUri = packageUri.AbsoluteUri,
                     ResultsBlobUri = resultsBlobUri.AbsoluteUri,
                     IssuedUtc = issuedUtc,
@@ -352,6 +366,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
 
                 var relative = Path.GetRelativePath(root, info.FullName).Replace('\\', '/');
                 if (!ClusterPackage.IsReservedPath(relative) &&
+                    !ClusterPackage.IsExcludedPayloadPath(relative) &&
                     !relative.StartsWith(
                         ClusterPackage.ResultsPrefix,
                         StringComparison.OrdinalIgnoreCase))
