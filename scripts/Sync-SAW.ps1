@@ -118,6 +118,7 @@ $script:MarkerPrefix = '.syncsaw/saw-flags/'
 $script:DeletionMarkerPrefix = '.syncsaw/deletions/'
 $script:ClusterPackageBlobName = 'cluster_package.zip'
 $script:ClusterPackageConfigName = 'cluster_package.config'
+$script:ClusterPackageTaskName = 'task.ps1'
 $script:SasTokenForRedaction = $null
 
 function ConvertTo-SyncSawHashtable {
@@ -691,6 +692,10 @@ function Get-LocalFileRecords {
             $relative.Equals(
                 $script:ClusterPackageConfigName,
                 [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            $relative.Equals(
+                $script:ClusterPackageTaskName,
+                [StringComparison]::OrdinalIgnoreCase
             )
         ) {
             continue
@@ -865,6 +870,10 @@ function Test-SawInternalBlob {
         ) -or
         $BlobPath.Equals(
             $script:ClusterPackageConfigName,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $BlobPath.Equals(
+            $script:ClusterPackageTaskName,
             [StringComparison]::OrdinalIgnoreCase
         )
 }

@@ -193,7 +193,8 @@ public static class AzCopyArguments
             localPath,
             containerUri.AbsoluteUri,
             "--recursive=true",
-            $"--exclude-path=.syncsaw;{ClusterPackage.BlobName};{ClusterPackage.ConfigurationEntryName}",
+            $"--exclude-path=.syncsaw;{ClusterPackage.BlobName};" +
+            $"{ClusterPackage.ConfigurationEntryName};{ClusterPackage.TaskScriptName}",
             $"--delete-destination={deleteDestination.ToString().ToLowerInvariant()}",
             "--output-type=json",
             "--log-level=ERROR"

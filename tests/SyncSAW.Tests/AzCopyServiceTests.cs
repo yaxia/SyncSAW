@@ -206,9 +206,12 @@ public sealed class AzCopyServiceTests
         var runner = new QueuedRunner(
             new AzCopyCommandResult(
                 0,
-                """{"Items":[{"Path":"cluster_package.zip","ContentLength":42,"LastModifiedTime":"2026-08-27T01:00:00Z"}]}""",
+                """{"Items":[{"Path":"cluster_package.zip","ContentLength":42,"LastModifiedTime":"2026-08-27T01:00:00Z"},{"Path":"task.ps1","ContentLength":10,"LastModifiedTime":"2026-08-27T01:00:00Z"}]}""",
                 string.Empty),
-            new AzCopyCommandResult(0, "{}", string.Empty));
+            new AzCopyCommandResult(
+                0,
+                "DRYRUN: copy https://account123.blob.core.windows.net/container/task.ps1",
+                string.Empty));
         var service = new AzCopyService(runner);
         var temporaryDirectory = Directory.CreateTempSubdirectory("SyncSAW.Tests.");
         try
@@ -221,6 +224,9 @@ public sealed class AzCopyServiceTests
             await File.WriteAllTextAsync(
                 Path.Combine(localFolder.FullName, ClusterPackage.ConfigurationEntryName),
                 "reserved");
+            await File.WriteAllTextAsync(
+                Path.Combine(localFolder.FullName, ClusterPackage.TaskScriptName),
+                "package only");
             var settings = new SyncSettings
             {
                 LocalFolder = localFolder.FullName,
@@ -235,6 +241,41 @@ public sealed class AzCopyServiceTests
             Assert.Empty(snapshot.Items);
             Assert.Empty(snapshot.RemoteBlobs);
             Assert.Empty(snapshot.Plan);
+        }
+        finally
+        {
+            temporaryDirectory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SynchronizeAsync_DoesNotCopyTaskScriptEvenIfDryRunReturnsIt()
+    {
+        const string uploadPlan =
+            "DRYRUN: copy https://account123.blob.core.windows.net/container/task.ps1";
+        var runner = new QueuedRunner(
+            new AzCopyCommandResult(0, "{}", string.Empty),
+            new AzCopyCommandResult(0, uploadPlan, string.Empty));
+        var service = new AzCopyService(runner);
+        var temporaryDirectory = Directory.CreateTempSubdirectory("SyncSAW.Tests.");
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(temporaryDirectory.FullName, ClusterPackage.TaskScriptName),
+                "package only");
+            var settings = new SyncSettings
+            {
+                LocalFolder = temporaryDirectory.FullName,
+                StorageAccount = "account123",
+                Container = "container",
+                AzCopyPath = CreateFakeAzCopy(temporaryDirectory)
+            };
+
+            await service.SynchronizeAsync(settings, CancellationToken.None);
+
+            Assert.Equal(["list", "sync"], runner.Commands);
+            Assert.Contains("--exclude-path=.syncsaw;cluster_package.zip;" +
+                "cluster_package.config;task.ps1", runner.Arguments[1]);
         }
         finally
         {
@@ -552,6 +593,39 @@ public sealed class AzCopyServiceTests
                     CancellationToken.None));
 
             Assert.Contains("reserved", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Null(runner.Arguments);
+        }
+        finally
+        {
+            temporaryDirectory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task UploadAsync_RejectsPackageOnlyTaskScript()
+    {
+        var runner = new RecordingRunner();
+        var service = new AzCopyService(runner);
+        var temporaryDirectory = Directory.CreateTempSubdirectory("SyncSAW.Tests.");
+        try
+        {
+            var localFile = Path.Combine(temporaryDirectory.FullName, "source.ps1");
+            await File.WriteAllTextAsync(localFile, "exit 0");
+            var settings = new SyncSettings
+            {
+                LocalFolder = temporaryDirectory.FullName,
+                StorageAccount = "account123",
+                Container = "container",
+                AzCopyPath = CreateFakeAzCopy(temporaryDirectory)
+            };
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                service.UploadAsync(
+                    settings,
+                    localFile,
+                    ClusterPackage.TaskScriptName,
+                    CancellationToken.None));
+
             Assert.Null(runner.Arguments);
         }
         finally

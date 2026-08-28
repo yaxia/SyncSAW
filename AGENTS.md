@@ -1,7 +1,13 @@
 # SyncSAW agent safety harness
 
 These rules apply to every agent that creates, edits, packages, or validates a
-cluster `bootstrap.ps1`.
+cluster `task.ps1`.
+
+Read `docs\AGENT-GUIDE.md` for the complete cluster package and iteration
+protocol. Use `docs\TROUBLESHOOTING.md` for non-destructive diagnostics.
+
+Root `task.ps1` is package-only. It must be delivered inside
+`cluster_package.zip`, never as a standalone Blob in the normal sync container.
 
 ## Devbox restrictions
 
@@ -13,7 +19,7 @@ cluster `bootstrap.ps1`.
 - Validate with builds, unit tests, local static checks, and newly named local
   files. Leave the running desktop app and existing cloud data untouched.
 
-## Generated `bootstrap.ps1` restrictions
+## Generated `task.ps1` restrictions
 
 - Treat the cluster node as immutable. Do not restart, shut down, stop, drain,
   reimage, or reconfigure the node or its services.
@@ -21,9 +27,9 @@ cluster `bootstrap.ps1`.
   append to, or change permissions on any existing file or directory.
 - Put result artifacts in a newly created `test-results` directory and open
   every output with create-new semantics. Use unique names for temporary files.
-- Upload only to the exact `ResultsBlobUri` from `cluster_package.config`, using
-  `PUT` with `If-None-Match: *`. Do not list, read, overwrite, or delete cloud
-  data.
+- Upload only to the exact `ResultsBlobUri` from the `bootstrap.config.json`
+  path supplied by the runner, using `PUT` with `If-None-Match: *`. Do not
+  list, read, overwrite, or delete cloud data.
 - Invoke bundled test executables directly by a literal package-relative path.
   Do not use nested shells, dynamic command construction, remoting, process
   control, or system-management tools.
@@ -31,7 +37,7 @@ cluster `bootstrap.ps1`.
 
   ```powershell
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `
-    .\scripts\Test-BootstrapScriptSafety.ps1 -Path <path-to-bootstrap.ps1>
+    .\scripts\Test-TaskScriptSafety.ps1 -Path <path-to-task.ps1>
   ```
 
 The cluster runner applies the same static check immediately before execution.

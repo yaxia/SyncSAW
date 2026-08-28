@@ -15,18 +15,24 @@ public sealed class ClusterPackagePublisherTests
     [Fact]
     public void GetPackageContainerName_UsesSeparateValidContainer()
     {
-        Assert.Equal("container-packages", ClusterPackage.GetPackageContainerName("container"));
+        Assert.Equal("container-package", ClusterPackage.GetPackageContainerName("container"));
         Assert.Throws<InvalidOperationException>(() =>
-            ClusterPackage.GetPackageContainerName(new string('a', 55)));
+            ClusterPackage.GetPackageContainerName(new string('a', 56)));
     }
 
     [Fact]
-    public void GetResultsContainerName_DefaultsToSyncContainerAndAllowsOverride()
+    public void GetResultsContainerName_UsesNormalSyncContainer()
     {
-        Assert.Equal("sync", ClusterPackage.GetResultsContainerName("sync", null));
-        Assert.Equal(
-            "external-results",
-            ClusterPackage.GetResultsContainerName("sync", " external-results "));
+        Assert.Equal("sync", ClusterPackage.GetResultsContainerName(" sync "));
+    }
+
+    [Fact]
+    public void TaskScript_IsExcludedOnlyFromNormalSync()
+    {
+        Assert.True(ClusterPackage.IsNormalSyncExcludedPath("task.ps1"));
+        Assert.True(ClusterPackage.IsNormalSyncExcludedPath(@"\TASK.PS1"));
+        Assert.False(ClusterPackage.IsReservedPath("task.ps1"));
+        Assert.False(ClusterPackage.IsNormalSyncExcludedPath("tools/task.ps1"));
     }
 
     [Fact]
@@ -36,7 +42,7 @@ public sealed class ClusterPackagePublisherTests
         try
         {
             await File.WriteAllTextAsync(
-                Path.Combine(directory.FullName, ClusterPackage.BootstrapScriptName),
+                Path.Combine(directory.FullName, ClusterPackage.TaskScriptName),
                 "exit 0");
             var publisher = new ClusterPackagePublisher(new PackageRunner(
                 string.Empty,
@@ -80,7 +86,7 @@ public sealed class ClusterPackagePublisherTests
         {
             var source = Directory.CreateDirectory(Path.Combine(directory.FullName, "source"));
             await File.WriteAllTextAsync(
-                Path.Combine(source.FullName, ClusterPackage.BootstrapScriptName),
+                Path.Combine(source.FullName, ClusterPackage.TaskScriptName),
                 "exit 0");
             Directory.CreateDirectory(Path.Combine(source.FullName, "data"));
             await File.WriteAllTextAsync(
@@ -108,7 +114,7 @@ public sealed class ClusterPackagePublisherTests
             var expectedStart = DateTimeOffset.Parse("2026-08-27T04:59:03Z");
             var expectedExpiry = expectedStart.AddDays(7);
             var sasUri =
-                "https://account123.blob.core.windows.net/container-packages/cluster_package.zip" +
+                "https://account123.blob.core.windows.net/container-package/cluster_package.zip" +
                 $"?st={Uri.EscapeDataString(expectedStart.ToString("yyyy-MM-ddTHH:mm:ssZ"))}" +
                 $"&se={Uri.EscapeDataString(expectedExpiry.ToString("yyyy-MM-ddTHH:mm:ssZ"))}" +
                 "&sp=r&spr=https&sv=2026-04-06&sr=b&skoid=00000000-0000-0000-0000-000000000001" +
@@ -132,7 +138,7 @@ public sealed class ClusterPackagePublisherTests
             Assert.Equal(
                 ["storage", "container", "create"],
                 runner.Calls[0].Arguments.Skip(2).Take(3));
-            Assert.Contains("container-packages", runner.Calls[0].Arguments);
+            Assert.Contains("container-package", runner.Calls[0].Arguments);
             Assert.Contains("off", runner.Calls[0].Arguments);
 
             Assert.Equal(
@@ -171,13 +177,13 @@ public sealed class ClusterPackagePublisherTests
 
             Assert.Equal("copy", runner.Calls[5].Arguments[0]);
             Assert.Equal(
-                "https://account123.blob.core.windows.net/container-packages/cluster_package.zip",
+                "https://account123.blob.core.windows.net/container-package/cluster_package.zip",
                 runner.Calls[5].Arguments[2]);
             Assert.Equal("AZCLI", runner.Calls[5].Environment?["AZCOPY_AUTO_LOGIN_TYPE"]);
 
             using var archive = ZipFile.OpenRead(capturedArchive);
             var names = archive.Entries.Select(entry => entry.FullName).ToArray();
-            Assert.Contains(ClusterPackage.BootstrapScriptName, names);
+            Assert.Contains(ClusterPackage.TaskScriptName, names);
             Assert.Contains("data/payload.txt", names);
             Assert.Contains(ClusterPackage.ConfigurationEntryName, names);
             Assert.DoesNotContain(".syncsaw/private.txt", names);

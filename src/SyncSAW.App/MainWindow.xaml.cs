@@ -582,8 +582,7 @@ public partial class MainWindow : Window
         if (ReferenceEquals(sender, PublishClusterPackageCheckBox) ||
             ReferenceEquals(sender, LocalFolderTextBox) ||
             ReferenceEquals(sender, StorageAccountTextBox) ||
-            ReferenceEquals(sender, ContainerTextBox) ||
-            ReferenceEquals(sender, ClusterResultsContainerTextBox))
+            ReferenceEquals(sender, ContainerTextBox))
         {
             _nextClusterPackagePublishUtc = DateTimeOffset.MinValue;
             _nextClusterPackagePublishAttemptUtc = DateTimeOffset.MinValue;
@@ -677,8 +676,6 @@ public partial class MainWindow : Window
         TenantId = NullIfWhiteSpace(TenantIdTextBox.Text),
         SubscriptionId = NullIfWhiteSpace(SubscriptionIdTextBox.Text),
         PublishClusterPackage = PublishClusterPackageCheckBox.IsChecked == true,
-        ClusterResultsContainer =
-            NullIfWhiteSpace(ClusterResultsContainerTextBox.Text)?.ToLowerInvariant(),
         LoginMode = (LoginModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() == "DeviceCode"
             ? EntraLoginMode.DeviceCode
             : EntraLoginMode.AzureCli,
@@ -700,7 +697,6 @@ public partial class MainWindow : Window
             : settings.TenantId;
         SubscriptionIdTextBox.Text = settings.SubscriptionId ?? SyncSettings.DefaultSubscriptionId;
         PublishClusterPackageCheckBox.IsChecked = settings.PublishClusterPackage;
-        ClusterResultsContainerTextBox.Text = settings.ClusterResultsContainer ?? string.Empty;
         LoginModeComboBox.SelectedIndex = settings.LoginMode == EntraLoginMode.AzureCli ? 0 : 1;
         _currentTheme = settings.Theme;
         ThemeComboBox.SelectedIndex = settings.Theme switch

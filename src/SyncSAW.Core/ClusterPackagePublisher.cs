@@ -9,15 +9,15 @@ public static class ClusterPackage
 {
     public const string BlobName = "cluster_package.zip";
     public const string ConfigurationEntryName = "cluster_package.config";
-    public const string BootstrapScriptName = "bootstrap.ps1";
-    public const int ConfigurationSchemaVersion = 3;
+    public const string TaskScriptName = "task.ps1";
+    public const int ConfigurationSchemaVersion = 5;
     public static readonly TimeSpan PublishInterval = TimeSpan.FromDays(1);
     public static readonly TimeSpan SasLifetime = TimeSpan.FromDays(7);
     public const long MaximumArchiveBytes = 2L * 1024 * 1024 * 1024;
     public const long MaximumPayloadBytes = 4L * 1024 * 1024 * 1024;
     // The runner's 10,000-entry archive limit includes the embedded config.
     public const int MaximumPayloadFiles = 9_999;
-    public const string PackageContainerSuffix = "-packages";
+    public const string PackageContainerSuffix = "-package";
     public const string ResultsPrefix = "cluster-results/";
     private static readonly HashSet<string> ExcludedPayloadPaths =
         new(StringComparer.OrdinalIgnoreCase)
@@ -33,6 +33,13 @@ public static class ClusterPackage
                normalized.Equals(ConfigurationEntryName, StringComparison.OrdinalIgnoreCase);
     }
 
+    public static bool IsNormalSyncExcludedPath(string path)
+    {
+        var normalized = (path ?? string.Empty).Trim().Trim('"').Replace('\\', '/').TrimStart('/');
+        return IsReservedPath(normalized) ||
+               normalized.Equals(TaskScriptName, StringComparison.OrdinalIgnoreCase);
+    }
+
     public static bool IsExcludedPayloadPath(string path)
     {
         var normalized = (path ?? string.Empty).Trim().Trim('"').Replace('\\', '/').TrimStart('/');
@@ -45,18 +52,14 @@ public static class ClusterPackage
         if (normalized.Length + PackageContainerSuffix.Length > 63)
         {
             throw new InvalidOperationException(
-                "Daily cluster package publishing requires a sync container name of 54 characters " +
+                "Daily cluster package publishing requires a sync container name of 55 characters " +
                 $"or fewer so the private '{PackageContainerSuffix.TrimStart('-')}' container can be created.");
         }
         return normalized + PackageContainerSuffix;
     }
 
-    public static string GetResultsContainerName(
-        string syncContainer,
-        string? configuredResultsContainer) =>
-        string.IsNullOrWhiteSpace(configuredResultsContainer)
-            ? StorageEndpoint.NormalizeContainer(syncContainer)
-            : StorageEndpoint.NormalizeContainer(configuredResultsContainer);
+    public static string GetResultsContainerName(string syncContainer) =>
+        StorageEndpoint.NormalizeContainer(syncContainer);
 }
 
 public sealed record ClusterPackagePublication(
@@ -92,9 +95,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
         }
 
         var packageContainer = ClusterPackage.GetPackageContainerName(settings.Container);
-        var resultsContainer = ClusterPackage.GetResultsContainerName(
-            settings.Container,
-            settings.ClusterResultsContainer);
+        var resultsContainer = ClusterPackage.GetResultsContainerName(settings.Container);
         var resultBlobPath =
             $"{ClusterPackage.ResultsPrefix}{now.UtcDateTime:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}.zip";
         var blobUri = StorageEndpoint.BuildBlobUri(

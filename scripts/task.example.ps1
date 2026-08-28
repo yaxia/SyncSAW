@@ -1,13 +1,17 @@
 <#
-Copy this file to bootstrap.ps1 in the package root. Run the test workload in the
+Copy this file to task.ps1 in the package root. Run the test workload in the
 marked section and write result files beneath test-results. The upload helper
-reads its rotating SAS from cluster_package.config; do not embed or log a SAS.
+reads its rotating SAS from bootstrap.config.json; do not embed or log a SAS.
 #>
 
 #requires -Version 5.1
 
 [CmdletBinding()]
-param()
+param(
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string]$BootstrapConfigPath
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -102,12 +106,12 @@ function Add-NewTestResult {
     }
 }
 
-$configurationPath = Join-Path $PSScriptRoot 'cluster_package.config'
+$configurationPath = [IO.Path]::GetFullPath($BootstrapConfigPath)
 $configuration = Get-Content -LiteralPath $configurationPath -Raw |
     ConvertFrom-Json -ErrorAction Stop
 if ([string]::IsNullOrWhiteSpace([string]$configuration.ResultsBlobUri)) {
     throw [IO.InvalidDataException]::new(
-        'cluster_package.config does not contain ResultsBlobUri.'
+        'bootstrap.config.json does not contain ResultsBlobUri.'
     )
 }
 
@@ -118,23 +122,25 @@ if (Test-Path -LiteralPath $resultRoot) {
     )
 }
 [void](New-Item -ItemType Directory -Path $resultRoot)
+$payloadRoot = Join-Path $resultRoot 'payload'
+[void](New-Item -ItemType Directory -Path $payloadRoot)
 
-# Run the test workload here. It may create new files only. Use unique output
-# names and FileMode.CreateNew, or Add-NewTestResult for text output.
+# Run the test workload here. It may create new files only beneath $payloadRoot.
+# Use unique names and FileMode.CreateNew, or Add-NewTestResult for text output.
 
-$resultFiles = @(Get-ChildItem -LiteralPath $resultRoot -File -Recurse)
+$resultFiles = @(Get-ChildItem -LiteralPath $payloadRoot -File -Recurse)
 if ($resultFiles.Count -eq 0) {
     throw [IO.InvalidDataException]::new(
         "The test workload did not create results under '$resultRoot'."
     )
 }
 
-$archivePath = Join-Path $PSScriptRoot (
+$archivePath = Join-Path $resultRoot (
     'syncsaw-results-{0}.zip' -f [guid]::NewGuid().ToString('N')
 )
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [IO.Compression.ZipFile]::CreateFromDirectory(
-    $resultRoot,
+    $payloadRoot,
     $archivePath,
     [IO.Compression.CompressionLevel]::Optimal,
     $false

@@ -93,6 +93,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
         var uploadPaths = AzCopyOutputParser.ParsePlan(uploadPlanResult.StandardOutput)
             .Where(transfer => !IsDeletion(transfer))
             .Select(transfer => ValidateRelativeTransferPath(transfer.Path))
+            .Where(path => !ClusterPackage.IsNormalSyncExcludedPath(path))
             .Concat(GetAuthoritativeLocalUploads(localFiles, remoteBlobs)
                 .Select(transfer => transfer.Path))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -304,7 +305,7 @@ public sealed class AzCopyService(IAzCopyRunner runner)
             .Where(item =>
                 !item.RelativePath.Equals(".syncsaw", StringComparison.OrdinalIgnoreCase) &&
                 !item.RelativePath.StartsWith(".syncsaw/", StringComparison.OrdinalIgnoreCase) &&
-                !ClusterPackage.IsReservedPath(item.RelativePath))
+                !ClusterPackage.IsNormalSyncExcludedPath(item.RelativePath))
             .Select(item =>
             {
                 var info = new FileInfo(item.Path);
@@ -332,7 +333,8 @@ public sealed class AzCopyService(IAzCopyRunner runner)
             environmentVariables: environment);
         EnsureSuccess("AzCopy could not create an upload/deletion plan.", uploadPlanResult);
 
-        var uploadPlan = AzCopyOutputParser.ParsePlan(uploadPlanResult.StandardOutput);
+        var uploadPlan = AzCopyOutputParser.ParsePlan(uploadPlanResult.StandardOutput)
+            .Where(item => !ClusterPackage.IsNormalSyncExcludedPath(item.Path));
         var localPaths = localFiles
             .Select(item => item.Path)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);

@@ -1,0 +1,9 @@
+{
+  "PackageUri": "",
+  "ResultsBlobUri": "",
+  "IntervalSeconds": 10,
+  "TaskExecutionRoot": "",
+  "TaskExecutionPath": "",
+  "SpdiPath": "",
+  "OutputPath": ""
+}

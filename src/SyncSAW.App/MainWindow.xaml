@@ -668,20 +668,7 @@
                                        Foreground="{DynamicResource MutedBrush}"
                                        FontSize="11"
                                        TextWrapping="Wrap"
-                                       Text="Publishes to a private &lt;container&gt;-packages container. Test result ZIPs return to the monitored container by default."/>
-                            <TextBlock Margin="22,13,0,5"
-                                       FontWeight="SemiBold"
-                                       Text="Different results container (optional)"/>
-                            <TextBox x:Name="ClusterResultsContainerTextBox"
-                                     Margin="22,0,0,0"
-                                     CharacterCasing="Lower"
-                                     TextChanged="SettingsChanged"/>
-                            <TextBlock Margin="22,4,0,0"
-                                       Foreground="{DynamicResource MutedBrush}"
-                                       FontSize="11"
-                                       TextWrapping="Wrap"
-                                       Text="Leave blank so desktop and SAW sync download results. Set only when those copies are not needed."/>
-
+                                       Text="Publishes to a private &lt;container&gt;-package container. Test result ZIPs return to the monitored container."/>
                             <Separator Margin="0,18,0,13"
                                        Background="{DynamicResource BorderBrush}"/>
 

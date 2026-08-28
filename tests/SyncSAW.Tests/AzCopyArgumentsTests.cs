@@ -20,7 +20,7 @@ public sealed class AzCopyArgumentsTests
         Assert.Equal(ContainerUri.AbsoluteUri, arguments[2]);
         Assert.Contains("--delete-destination=false", arguments);
         Assert.Contains(
-            "--exclude-path=.syncsaw;cluster_package.zip;cluster_package.config",
+            "--exclude-path=.syncsaw;cluster_package.zip;cluster_package.config;task.ps1",
             arguments);
         Assert.DoesNotContain(arguments, argument => argument.Contains('"'));
     }
@@ -113,7 +113,6 @@ public sealed class AzCopyArgumentsTests
         Assert.Equal(10, settings.AutoSyncIntervalSeconds);
         Assert.False(settings.PauseSync);
         Assert.False(settings.PublishClusterPackage);
-        Assert.Null(settings.ClusterResultsContainer);
     }
 
     [Fact]
@@ -169,7 +168,7 @@ public sealed class AzCopyArgumentsTests
     {
         var arguments = AzCopyArguments.AzureCliCreatePrivateContainer(
             "account123",
-            "container-packages");
+            "container-package");
         var argumentArray = arguments.ToArray();
 
         Assert.Equal(["storage", "container", "create"], arguments.Take(3));
@@ -184,7 +183,7 @@ public sealed class AzCopyArgumentsTests
     {
         var arguments = AzCopyArguments.AzureCliGetContainerPublicAccess(
             "account123",
-            "container-packages");
+            "container-package");
 
         Assert.Equal(["storage", "container", "show"], arguments.Take(3));
         Assert.Contains("properties.publicAccess", arguments);
