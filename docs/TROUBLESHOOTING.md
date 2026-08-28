@@ -65,12 +65,15 @@ registered repositories, and installed module versions without making changes.
 | --- | --- |
 | `bootstrap.ps1` rejects `PackageUri` | Use a complete HTTPS user-delegation SAS URL with exact read-only Blob scope for `<sync-container>-package/cluster_package.zip`. |
 | `bootstrap.ps1` rejects `ResultsBlobUri` | Use a complete HTTPS user-delegation SAS URL with exact create-only Blob scope for `<sync-container>/cluster-results/<unique>.zip` in the same storage account. |
-| Package downloads stop after seven days | Publish from the desktop at least once every seven days. To recover, replace both SAS URLs in external `bootstrap.config.json`. |
-| A changed package is not downloaded | Check the remote ETag and Last Modified value. The Blob must be strictly newer than the installed package and remain unchanged through the conditional download. |
+| Package downloads stop after seven days | Publish from the desktop at least once every seven days; both update types carry refreshed SAS URLs in metadata. To recover, replace both SAS URLs in external `bootstrap.config.json`. |
+| A changed package is not downloaded | First inspect the redacted descriptor change type. `commands-only` intentionally never downloads. For `binary`, check ETag, Last Modified, descriptor SHA-256, and whether the Blob remained unchanged through conditional download. |
+| Commands-only update is rejected | Establish or recover state with a binary update. Commands-only requires the prior package directory, its `task.ps1`, and a valid installed binary hash. |
+| Commands-only update uses old files or settings | This is by design: only validated metadata arguments are new. Mark the publication `binary` whenever any script, executable, library, input, or package-local config must change. |
+| Update descriptor is rejected | Republish with desktop schema 6. Required metadata is descriptor version 1, exact ZIP SHA-256, UTC build time, `binary`/`commands-only` type, valid schema-6 bootstrap configuration, and a valid command for commands-only. Combined metadata is limited to 8,192 UTF-8 bytes. |
 | Polling is skipped | This is expected while `task.ps1` is active. Bootstrap does not poll, install, or start another task until it exits. |
 | Another bootstrap instance is reported | One runner already owns the mutex for that configuration. Do not start a duplicate. |
-| Package schema is rejected | Deploy the current schema-5 `bootstrap.ps1` and config. Older schema-2, schema-3, and schema-4 runners are intentionally incompatible. |
-| Archive validation fails | Check size, expanded size, entry count, traversal paths, reparse points, root `task.ps1`, schema-5 config, and the task safety harness. |
+| Package schema is rejected | Deploy the current schema-6 `bootstrap.ps1` and config. Older schema-2 through schema-5 runners are intentionally incompatible. |
+| Archive validation fails | Check descriptor hash, size, expanded size, entry count, traversal paths, reparse points, root `task.ps1`, schema-6 config, and the task safety harness. |
 | `task.ps1` is rejected | Run `scripts\Test-TaskScriptSafety.ps1` locally and fix every additive-only violation before publishing. |
 | Result upload returns `409` or `412` | The exact result Blob already exists. Generate a new unique result path and create-only SAS; never overwrite the existing Blob. |
 | No result reaches the development machine | Confirm the result Blob is under the normal sync container's `cluster-results` path, then inspect desktop sync status without deleting or replacing the Blob. |

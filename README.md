@@ -9,7 +9,9 @@ It includes:
   transfers.
 - A standalone PowerShell 7 SAW client that uses Azure PowerShell.
 - A Windows PowerShell 5.1 cluster bootstrap that securely polls and executes
-  versioned test packages without an Entra identity or Azure modules.
+  versioned test packages without an Entra identity or Azure modules. Its
+  Blob-metadata protocol downloads verified binary updates but executes
+  command-only rounds against the installed package without downloading.
 - A testable core library for validation, process execution, parsing,
   synchronization state, scheduling, settings, and package publication.
 

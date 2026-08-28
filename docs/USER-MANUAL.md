@@ -176,8 +176,17 @@ CLI command that creates a SAS is deliberately omitted from operation logs.
 
 When cluster publishing is enabled, the desktop generates seven-day package
 read and result upload SAS URLs in memory, writes them only into package
-configuration, and removes its temporary archive after upload. Neither SAS is
-persisted in GUI settings or logs.
+configuration and protected Blob metadata, and removes its temporary archive
+after upload. Neither SAS is persisted in GUI settings or logs; AzCopy metadata
+arguments are suppressed from operation logs.
+
+The package Blob also receives a versioned update descriptor. A `binary`
+descriptor makes bootstrap download, verify, and install the ZIP. A
+`commands-only` descriptor makes bootstrap keep the installed package and run
+only the validated new arguments from metadata. Commands-only updates require a
+successful earlier binary installation. Their validated metadata also refreshes
+the package-read SAS and supplies a new exact create-only result SAS without
+downloading the ZIP.
 
 ## PowerShell SAW client
 

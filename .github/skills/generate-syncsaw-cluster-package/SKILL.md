@@ -4,7 +4,7 @@ description: Generate or update a SyncSAW identity-less cluster package, bootstr
 compatibility: Windows cluster targets using 64-bit Windows PowerShell 5.1; publishing requires the SyncSAW desktop app and Azure CLI authentication.
 metadata:
   author: SyncSAW
-  version: "1.0"
+  version: "1.1"
 ---
 
 # Generate a SyncSAW cluster package
@@ -27,21 +27,76 @@ Read this contract before generating, modifying, packaging, or deploying
    Put workload-only settings in root `task.config.json`; it follows the same
    package-only synchronization rule. Keep general `TaskExecutionPath` and
    `OutputPath` settings in external `bootstrap.config.json`.
-4. The package contains generated schema-5 `cluster_package.config`. After a
-   successful download, the poller reads its refreshed `PackageUri` and
+4. Every package Blob has descriptor-version-1 metadata. Read and follow the
+   update descriptor protocol below; do not assume every changed ETag requires
+   a download.
+5. A binary package contains generated schema-6 `cluster_package.config`. After
+   a successful hash-verified download, the poller reads its refreshed `PackageUri` and
    atomically saves it to the external `bootstrap.config.json` before starting
    the task.
-5. The same generated config contains `ResultsBlobUri`, an HTTPS exact-Blob user
+6. The same generated config contains `ResultsBlobUri`, an HTTPS exact-Blob user
    delegation SAS with create-only permission (`sp=c`, `sr=b`). The poller also
    saves it to the external config and starts `task.ps1` with
    `-BootstrapConfigPath <external-config>`.
-6. `task.ps1` reads `ResultsBlobUri` from that supplied path, creates one new
+7. `task.ps1` reads `ResultsBlobUri` from that supplied path, creates one new
    result ZIP, and uploads it with `PUT` plus `If-None-Match: *`. It must not
    embed, copy, or log either SAS.
 
 `ResultsBlobUri` always targets
 `<sync-container>/cluster-results/<unique>.zip`, allowing the desktop app and
 SAW client to download results for the next agent iteration.
+
+## Update descriptor protocol
+
+Set these Blob metadata fields when publishing `cluster_package.zip`:
+
+| Key | Value |
+| --- | --- |
+| `syncsaw_descriptor_version` | `1` |
+| `syncsaw_package_sha256` | Lowercase SHA-256 of the exact uploaded ZIP |
+| `syncsaw_package_built_utc` | UTC round-trip build timestamp |
+| `syncsaw_change_type` | `binary` or `commands-only` |
+| `syncsaw_execution_command` | Commands-only Base64 UTF-8 JSON string array; omit for binary |
+| `syncsaw_bootstrap_config` | Base64 UTF-8 schema-6 JSON with refreshed package-read and exact result-create SAS URLs plus issue/expiry times |
+
+The combined UTF-8 metadata names and values must not exceed 8,192 bytes.
+SyncSAW generates and atomically uploads these fields; do not hand-edit them.
+
+Choose the update type in package-root `task.config.json`:
+
+```json
+{
+  "PackageChangeType": "CommandsOnly",
+  "ExecutionArguments": ["-Mode", "quick-run"]
+}
+```
+
+- Use `Binary` (the default) if any package file, script, executable, library, or
+  input changed. Bootstrap downloads with ETag protection, verifies
+  `syncsaw_package_sha256`, extracts, adopts schema-6 SAS rollover, and executes
+  the new package-root `task.ps1`.
+- Use `CommandsOnly` only if the cluster already has the required binary
+  package and only task parameters changed. Bootstrap must not download,
+  extract, or replace the ZIP contents. It runs the existing installed
+  `task.ps1` using only the command arguments validated from Blob metadata.
+- A first deployment and recovery after installed state/package loss must be
+  `Binary`. A commands-only descriptor without a valid installed package fails
+  closed.
+- The desktop forces its first publication after startup to `Binary` because it
+  has no in-memory publication baseline. To issue a command-only round, let that
+  baseline publish first and then change `ExecutionArguments`.
+- Commands-only does not load the new ZIP's `task.config.json`. It does validate
+  `syncsaw_bootstrap_config`, atomically persists the refreshed SAS URLs, and
+  gives the existing task a new one-use result upload target. For binary
+  updates, the ZIP's `cluster_package.config` must match the metadata copy.
+- Base64 is not encryption. The metadata configuration contains bearer
+  credentials; never log, print, commit, or copy it to agent output.
+
+The execution command has a fixed PowerShell 5.1 and `task.ps1` prefix. An agent
+may provide at most 32 additional strings, each at most 1,024 UTF-8 bytes,
+without control characters, and may not provide `-BootstrapConfigPath`.
+Arbitrary executables, script paths, command strings, pipelines, and shell
+operators are not part of this protocol.
 
 ## Safety
 

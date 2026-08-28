@@ -215,15 +215,31 @@ public static class AzCopyArguments
         "--log-level=ERROR"
     ];
 
-    public static IReadOnlyList<string> Copy(string source, string destination) =>
-    [
-        "copy",
-        source,
-        destination,
-        "--overwrite=true",
-        "--output-type=json",
-        "--log-level=ERROR"
-    ];
+    public static IReadOnlyList<string> Copy(
+        string source,
+        string destination,
+        IReadOnlyDictionary<string, string>? metadata = null)
+    {
+        var arguments = new List<string>
+        {
+            "copy",
+            source,
+            destination,
+            "--overwrite=true",
+            "--output-type=json",
+            "--log-level=ERROR"
+        };
+        if (metadata is not null && metadata.Count > 0)
+        {
+            arguments.Add("--metadata");
+            arguments.Add(string.Join(
+                ';',
+                metadata
+                    .OrderBy(item => item.Key, StringComparer.Ordinal)
+                    .Select(item => $"{item.Key}={item.Value}")));
+        }
+        return arguments;
+    }
 
     public static IReadOnlyList<string> Remove(Uri blobUri) =>
     [

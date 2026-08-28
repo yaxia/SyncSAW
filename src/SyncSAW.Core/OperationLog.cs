@@ -17,10 +17,13 @@ public sealed partial class OperationLog
 
     public async Task WriteCommandStartedAsync(
         string executable,
-        IReadOnlyList<string> arguments)
+        IReadOnlyList<string> arguments,
+        bool includeArguments = true)
     {
         await WriteAsync(
-            $"START {Path.GetFileName(executable)} {FormatArguments(arguments)}");
+            includeArguments
+                ? $"START {Path.GetFileName(executable)} {FormatArguments(arguments)}"
+                : $"START {Path.GetFileName(executable)} <arguments redacted>");
     }
 
     public async Task WriteCommandCompletedAsync(

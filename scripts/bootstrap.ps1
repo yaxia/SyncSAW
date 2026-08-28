@@ -4,11 +4,11 @@ Bootstraps and runs versioned test-cluster packages without an Entra identity.
 
 .DESCRIPTION
 bootstrap.ps1 runs under 64-bit Windows PowerShell 5.1 as a local administrator. It
-checks a preconfigured HTTPS SAS URL for cluster_package.zip every 10 seconds.
-When Azure Blob Storage reports a newer package, the script downloads it,
-extracts it into a versioned task execution directory, adopts both refreshed
-user delegation SAS URLs from cluster_package.config, persists them atomically
-to its own bootstrap.config.json, and starts task.ps1 when that file exists.
+checks a preconfigured HTTPS SAS URL for cluster_package.zip every 10 seconds and
+validates its versioned update descriptor from Blob metadata. Binary updates are
+downloaded, hash-verified, extracted, and adopted. Commands-only updates do not
+download or replace the installed package; they run the metadata command against
+the last installed package-root task.ps1.
 
 Polling cycles skip package checks for the full lifetime of task.ps1. The script
 does not require Az modules, Azure CLI, AzCopy, storage keys, or an Entra login.
@@ -53,6 +53,18 @@ $script:LogFileName = 'syncsaw-package-runner.log'
 $script:MaximumPackageBytes = 2GB
 $script:MaximumExtractedBytes = 4GB
 $script:MaximumArchiveEntries = 10000
+$script:PackageConfigurationSchemaVersion = 6
+$script:UpdateDescriptorVersion = '1'
+$script:MaximumBlobMetadataBytes = 8192
+$script:MaximumExecutionArguments = 32
+$script:MaximumExecutionArgumentBytes = 1024
+$script:BootstrapConfigPlaceholder = '{BootstrapConfigPath}'
+$script:DescriptorVersionMetadataKey = 'syncsaw_descriptor_version'
+$script:PackageSha256MetadataKey = 'syncsaw_package_sha256'
+$script:PackageBuiltUtcMetadataKey = 'syncsaw_package_built_utc'
+$script:ChangeTypeMetadataKey = 'syncsaw_change_type'
+$script:ExecutionCommandMetadataKey = 'syncsaw_execution_command'
+$script:BootstrapConfigurationMetadataKey = 'syncsaw_bootstrap_config'
 
 function ConvertTo-SyncRunnerHashtable {
     [CmdletBinding()]
@@ -546,6 +558,196 @@ function Assert-SyncRunnerAdministrator {
     }
 }
 
+function Get-ClusterPackageUpdateDescriptor {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [Collections.Specialized.NameValueCollection]$Headers,
+        [Parameter(Mandatory)][string]$CurrentPackageUri
+    )
+
+    [int]$metadataBytes = 0
+    foreach ($headerName in @($Headers.AllKeys)) {
+        if ($headerName.StartsWith(
+                'x-ms-meta-',
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            $metadataName = $headerName.Substring('x-ms-meta-'.Length)
+            $metadataBytes += [Text.Encoding]::UTF8.GetByteCount($metadataName)
+            $metadataBytes += [Text.Encoding]::UTF8.GetByteCount(
+                [string]$Headers[$headerName]
+            )
+        }
+    }
+    if ($metadataBytes -gt $script:MaximumBlobMetadataBytes) {
+        throw [IO.InvalidDataException]::new(
+            'Cluster package Blob metadata exceeds the 8,192-byte limit.'
+        )
+    }
+
+    $getValue = {
+        param([string]$Name)
+        return [string]$Headers["x-ms-meta-$Name"]
+    }
+    $version = & $getValue $script:DescriptorVersionMetadataKey
+    $packageSha256 = & $getValue $script:PackageSha256MetadataKey
+    $packageBuiltValue = & $getValue $script:PackageBuiltUtcMetadataKey
+    $changeType = (& $getValue $script:ChangeTypeMetadataKey).ToLowerInvariant()
+    $executionValue = & $getValue $script:ExecutionCommandMetadataKey
+    $bootstrapConfigurationValue =
+        & $getValue $script:BootstrapConfigurationMetadataKey
+
+    if ($version -cne $script:UpdateDescriptorVersion) {
+        throw [IO.InvalidDataException]::new(
+            "Cluster package metadata has a missing or unsupported update descriptor version."
+        )
+    }
+    if ($packageSha256 -notmatch '^[a-fA-F0-9]{64}$') {
+        throw [IO.InvalidDataException]::new(
+            'Cluster package metadata does not contain a valid SHA-256 package hash.'
+        )
+    }
+    $packageBuiltUtc = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+            $packageBuiltValue,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal -bor
+                [Globalization.DateTimeStyles]::AdjustToUniversal,
+            [ref]$packageBuiltUtc
+        )) {
+        throw [IO.InvalidDataException]::new(
+            'Cluster package metadata does not contain a valid UTC package build time.'
+        )
+    }
+    if ($changeType -notin @('binary', 'commands-only')) {
+        throw [IO.InvalidDataException]::new(
+            "Cluster package metadata change type must be 'binary' or 'commands-only'."
+        )
+    }
+
+    if ([string]::IsNullOrWhiteSpace($bootstrapConfigurationValue)) {
+        throw [IO.InvalidDataException]::new(
+            'Cluster package metadata does not contain bootstrap configuration.'
+        )
+    }
+    try {
+        $bootstrapJson = [Text.Encoding]::UTF8.GetString(
+            [Convert]::FromBase64String($bootstrapConfigurationValue)
+        )
+        $bootstrapObject = $bootstrapJson |
+            ConvertFrom-Json -ErrorAction Stop
+        $bootstrapConfiguration = ConvertTo-ValidatedPackageConfiguration `
+            -Configuration (
+                ConvertTo-SyncRunnerHashtable -InputObject $bootstrapObject
+            ) `
+            -CurrentPackageUri $CurrentPackageUri
+    }
+    catch {
+        throw [IO.InvalidDataException]::new(
+            'Cluster package bootstrap configuration metadata is invalid.',
+            $_.Exception
+        )
+    }
+    if ($bootstrapConfiguration.IssuedUtc -ne
+        $packageBuiltUtc.ToUniversalTime()) {
+        throw [IO.InvalidDataException]::new(
+            'Package build time does not match bootstrap configuration issue time.'
+        )
+    }
+
+    $executionCommand = $null
+    if ($changeType -eq 'commands-only') {
+        if ([string]::IsNullOrWhiteSpace($executionValue)) {
+            throw [IO.InvalidDataException]::new(
+                'Commands-only package metadata must include an execution command.'
+            )
+        }
+        try {
+            $json = [Text.Encoding]::UTF8.GetString(
+                [Convert]::FromBase64String($executionValue)
+            )
+            if (-not $json.TrimStart().StartsWith(
+                    '[',
+                    [StringComparison]::Ordinal
+                )) {
+                throw [FormatException]::new('The execution command must be a JSON array.')
+            }
+            $executionCommand = @($json | ConvertFrom-Json -ErrorAction Stop)
+        }
+        catch {
+            throw [IO.InvalidDataException]::new(
+                'Cluster package execution command metadata is not valid Base64 JSON.',
+                $_.Exception
+            )
+        }
+
+        $expectedPrefix = @(
+            'powershell.exe',
+            '-NoLogo',
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'RemoteSigned',
+            '-File',
+            $script:PackageTaskName,
+            '-BootstrapConfigPath',
+            $script:BootstrapConfigPlaceholder
+        )
+        if ($executionCommand.Count -le $expectedPrefix.Count -or
+            $executionCommand.Count -gt (
+                $expectedPrefix.Count + $script:MaximumExecutionArguments
+            )) {
+            throw [IO.InvalidDataException]::new(
+                'Cluster package execution command has an invalid argument count.'
+            )
+        }
+        for ($index = 0; $index -lt $executionCommand.Count; $index++) {
+            if ($executionCommand[$index] -isnot [string]) {
+                throw [IO.InvalidDataException]::new(
+                    'Cluster package execution command must contain only strings.'
+                )
+            }
+            $argument = [string]$executionCommand[$index]
+            if ($argument.IndexOfAny([char[]]@(0, 10, 13)) -ge 0 -or
+                [Text.Encoding]::UTF8.GetByteCount($argument) -gt
+                    $script:MaximumExecutionArgumentBytes) {
+                throw [IO.InvalidDataException]::new(
+                    'Cluster package execution command contains an invalid argument.'
+                )
+            }
+            if ($index -lt $expectedPrefix.Count -and
+                $argument -cne $expectedPrefix[$index]) {
+                throw [IO.InvalidDataException]::new(
+                    'Cluster package execution command cannot change the PowerShell or task.ps1 entrypoint.'
+                )
+            }
+            if ($index -ge $expectedPrefix.Count -and
+                $argument.Equals(
+                    '-BootstrapConfigPath',
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw [IO.InvalidDataException]::new(
+                    'Cluster package execution command cannot replace BootstrapConfigPath.'
+                )
+            }
+        }
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($executionValue)) {
+        throw [IO.InvalidDataException]::new(
+            'Binary package metadata must not include an execution command.'
+        )
+    }
+
+    return [pscustomobject]@{
+        Version = [int]$version
+        PackageSha256 = $packageSha256.ToLowerInvariant()
+        PackageBuiltUtc = $packageBuiltUtc.ToUniversalTime()
+        ChangeType = $changeType
+        ExecutionCommand = $executionCommand
+        BootstrapConfiguration = $bootstrapConfiguration
+        MetadataBytes = $metadataBytes
+    }
+}
+
 function Get-RemotePackageMetadata {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Uri)
@@ -573,10 +775,14 @@ function Get-RemotePackageMetadata {
                 'Remote package metadata did not include an ETag.'
             )
         }
+        $updateDescriptor = Get-ClusterPackageUpdateDescriptor `
+            -Headers $response.Headers `
+            -CurrentPackageUri $Uri
         return [pscustomobject]@{
             ETag = [string]$response.Headers['ETag']
             LastModifiedUtc = [DateTimeOffset]$response.LastModified.ToUniversalTime()
             ContentLength = [long]$response.ContentLength
+            UpdateDescriptor = $updateDescriptor
         }
     }
     finally {
@@ -662,6 +868,23 @@ function Copy-SyncRunnerStream {
         $Destination.Write($buffer, 0, $read)
     }
     return $total
+}
+
+function Get-SyncRunnerFileSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString(
+            $sha256.ComputeHash($stream)
+        ).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
 }
 
 function Receive-ClusterPackage {
@@ -827,22 +1050,16 @@ function Expand-ClusterPackageSafely {
     }
 }
 
-function Get-RefreshedPackageConfiguration {
+function ConvertTo-ValidatedPackageConfiguration {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$PackageDirectory,
+        [Parameter(Mandatory)][hashtable]$Configuration,
         [Parameter(Mandatory)][string]$CurrentPackageUri
     )
 
-    $path = Join-Path $PackageDirectory $script:PackageConfigName
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw [IO.InvalidDataException]::new(
-            "Package does not contain required '$($script:PackageConfigName)'."
-        )
-    }
-    $configuration = Read-SyncRunnerJson -Path $path
     if (-not $configuration.ContainsKey('SchemaVersion') -or
-        [int]$configuration.SchemaVersion -ne 5 -or
+        [int]$configuration.SchemaVersion -ne
+            $script:PackageConfigurationSchemaVersion -or
         -not $configuration.ContainsKey('PackageUri') -or
         -not $configuration.ContainsKey('ResultsBlobUri') -or
         -not $configuration.ContainsKey('IssuedUtc') -or
@@ -885,12 +1102,30 @@ function Get-RefreshedPackageConfiguration {
         )
     }
     return [pscustomobject]@{
-        SchemaVersion = 5
+        SchemaVersion = $script:PackageConfigurationSchemaVersion
         PackageUri = $refreshed
         ResultsBlobUri = $resultsBlobUri
-        IssuedUtc = $issuedUtc.ToString('O')
-        ExpiresUtc = $expiresUtc.ToString('O')
+        IssuedUtc = $issuedUtc.ToUniversalTime()
+        ExpiresUtc = $expiresUtc.ToUniversalTime()
     }
+}
+
+function Get-RefreshedPackageConfiguration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PackageDirectory,
+        [Parameter(Mandatory)][string]$CurrentPackageUri
+    )
+
+    $path = Join-Path $PackageDirectory $script:PackageConfigName
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw [IO.InvalidDataException]::new(
+            "Package does not contain required '$($script:PackageConfigName)'."
+        )
+    }
+    return ConvertTo-ValidatedPackageConfiguration `
+        -Configuration (Read-SyncRunnerJson -Path $path) `
+        -CurrentPackageUri $CurrentPackageUri
 }
 
 function Save-RefreshedBootstrapConfiguration {
@@ -927,12 +1162,33 @@ function Install-ClusterPackage {
             -Uri $PackageUri `
             -Destination $downloadPath `
             -ExpectedETag ([string]$RemoteMetadata.ETag)
+        $actualPackageSha256 = Get-SyncRunnerFileSha256 -Path $downloadPath
+        if ($actualPackageSha256 -cne
+            [string]$RemoteMetadata.UpdateDescriptor.PackageSha256) {
+            throw [IO.InvalidDataException]::new(
+                'The downloaded package SHA-256 does not match its Blob update descriptor.'
+            )
+        }
         Expand-ClusterPackageSafely `
             -ArchivePath $downloadPath `
             -Destination $stagingPath
         $packageConfiguration = Get-RefreshedPackageConfiguration `
             -PackageDirectory $stagingPath `
             -CurrentPackageUri $PackageUri
+        $metadataConfiguration =
+            $RemoteMetadata.UpdateDescriptor.BootstrapConfiguration
+        if ($packageConfiguration.PackageUri -cne
+                $metadataConfiguration.PackageUri -or
+            $packageConfiguration.ResultsBlobUri -cne
+                $metadataConfiguration.ResultsBlobUri -or
+            $packageConfiguration.IssuedUtc -ne
+                $metadataConfiguration.IssuedUtc -or
+            $packageConfiguration.ExpiresUtc -ne
+                $metadataConfiguration.ExpiresUtc) {
+            throw [IO.InvalidDataException]::new(
+                'Package configuration does not match its Blob update descriptor.'
+            )
+        }
         $stagedTaskScript = Join-Path $stagingPath $script:PackageTaskName
         if (Test-Path -LiteralPath $stagedTaskScript -PathType Leaf) {
             [void](Assert-TaskScriptSafety -Path $stagedTaskScript)
@@ -951,6 +1207,9 @@ function Install-ClusterPackage {
             IssuedUtc = $packageConfiguration.IssuedUtc
             ExpiresUtc = $packageConfiguration.ExpiresUtc
             Metadata = $downloadedMetadata
+            UpdateDescriptor = $RemoteMetadata.UpdateDescriptor
+            InstalledPackageSha256 =
+                [string]$RemoteMetadata.UpdateDescriptor.PackageSha256
         }
     }
     finally {
@@ -959,11 +1218,122 @@ function Install-ClusterPackage {
     }
 }
 
+function Get-InstalledClusterPackageForCommandUpdate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ExecutionRoot,
+        [Parameter(Mandatory)][object]$RemoteMetadata,
+        [AllowNull()][hashtable]$State
+    )
+
+    if ($null -eq $State -or
+        -not $State.ContainsKey('PackageDirectory') -or
+        [string]::IsNullOrWhiteSpace([string]$State.PackageDirectory)) {
+        throw [IO.InvalidDataException]::new(
+            'A commands-only update requires a previously installed binary package.'
+        )
+    }
+
+    $packagesRoot = [IO.Path]::GetFullPath(
+        (Join-Path $ExecutionRoot 'packages')
+    ).TrimEnd('\')
+    $packageDirectory = [IO.Path]::GetFullPath(
+        [string]$State.PackageDirectory
+    )
+    $packagesPrefix = $packagesRoot + '\'
+    if (-not $packageDirectory.StartsWith(
+            $packagesPrefix,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not (Test-Path -LiteralPath $packageDirectory -PathType Container)) {
+        throw [IO.InvalidDataException]::new(
+            'The installed package state does not identify a valid package directory.'
+        )
+    }
+    Assert-NoReparsePointInPath -Path $packageDirectory
+
+    $taskScript = Join-Path $packageDirectory $script:PackageTaskName
+    if (-not (Test-Path -LiteralPath $taskScript -PathType Leaf)) {
+        throw [IO.InvalidDataException]::new(
+            'A commands-only update requires task.ps1 from a previously installed binary package.'
+        )
+    }
+    [void](Assert-TaskScriptSafety -Path $taskScript)
+
+    $installedPackageSha256 = if (
+        $State.ContainsKey('InstalledPackageSha256')
+    ) {
+        [string]$State.InstalledPackageSha256
+    }
+    elseif ($State.ContainsKey('PackageSha256')) {
+        [string]$State.PackageSha256
+    }
+    else {
+        ''
+    }
+    if ($installedPackageSha256 -notmatch '^[a-fA-F0-9]{64}$') {
+        throw [IO.InvalidDataException]::new(
+            'The installed package state does not contain a valid binary package hash.'
+        )
+    }
+
+    return [pscustomobject]@{
+        PackageDirectory = $packageDirectory
+        PackageUri =
+            $RemoteMetadata.UpdateDescriptor.BootstrapConfiguration.PackageUri
+        ResultsBlobUri =
+            $RemoteMetadata.UpdateDescriptor.BootstrapConfiguration.ResultsBlobUri
+        IssuedUtc =
+            $RemoteMetadata.UpdateDescriptor.BootstrapConfiguration.IssuedUtc.ToString('O')
+        ExpiresUtc =
+            $RemoteMetadata.UpdateDescriptor.BootstrapConfiguration.ExpiresUtc.ToString('O')
+        Metadata = $RemoteMetadata
+        UpdateDescriptor = $RemoteMetadata.UpdateDescriptor
+        InstalledPackageSha256 = $installedPackageSha256.ToLowerInvariant()
+    }
+}
+
+function ConvertTo-SyncRunnerNativeArgument {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $builder = [Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    [int]$backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$builder.Append(('\' * (($backslashes * 2) + 1)))
+            [void]$builder.Append('"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append(('\' * $backslashes))
+            $backslashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append(('\' * ($backslashes * 2)))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
 function Start-ClusterPackageTaskScript {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PackageDirectory,
-        [Parameter(Mandatory)][string]$BootstrapConfigPath
+        [Parameter(Mandatory)][string]$BootstrapConfigPath,
+        [Parameter(Mandatory)][object]$UpdateDescriptor
     )
 
     $taskScript = Join-Path $PackageDirectory $script:PackageTaskName
@@ -971,12 +1341,32 @@ function Start-ClusterPackageTaskScript {
         return $null
     }
     [void](Assert-TaskScriptSafety -Path $taskScript)
-    $argumentList = (
-        '-NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "{0}" ' +
-        '-BootstrapConfigPath "{1}"'
-    ) -f $taskScript.Replace('"', '""'), $BootstrapConfigPath.Replace('"', '""')
+    $command = if ($null -eq $UpdateDescriptor.ExecutionCommand) {
+        @(
+            'powershell.exe',
+            '-NoLogo',
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'RemoteSigned',
+            '-File',
+            $script:PackageTaskName,
+            '-BootstrapConfigPath',
+            $script:BootstrapConfigPlaceholder
+        )
+    }
+    else {
+        @($UpdateDescriptor.ExecutionCommand)
+    }
+    $command[6] = $taskScript
+    $command[8] = $BootstrapConfigPath
+    $argumentList = @($command | Select-Object -Skip 1 | ForEach-Object {
+            ConvertTo-SyncRunnerNativeArgument -Value ([string]$_)
+        }) -join ' '
+    $windowsPowerShell = Join-Path `
+        ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) `
+        'WindowsPowerShell\v1.0\powershell.exe'
     return Start-Process `
-        -FilePath (Join-Path $PSHOME 'powershell.exe') `
+        -FilePath $windowsPowerShell `
         -ArgumentList $argumentList `
         -WorkingDirectory $PackageDirectory `
         -PassThru
@@ -1264,11 +1654,18 @@ function Save-CompletedPackageState {
     Save-SyncRunnerJson `
         -Path $Path `
         -Value @{
-            SchemaVersion = 1
+            SchemaVersion = 2
             ETag = [string]$InstalledPackage.Metadata.ETag
             LastModifiedUtc = (
                 [DateTimeOffset]$InstalledPackage.Metadata.LastModifiedUtc
             ).ToUniversalTime().ToString('O')
+            PackageSha256 = [string]$InstalledPackage.UpdateDescriptor.PackageSha256
+            InstalledPackageSha256 =
+                [string]$InstalledPackage.InstalledPackageSha256
+            PackageBuiltUtc = (
+                [DateTimeOffset]$InstalledPackage.UpdateDescriptor.PackageBuiltUtc
+            ).ToUniversalTime().ToString('O')
+            ChangeType = [string]$InstalledPackage.UpdateDescriptor.ChangeType
             PackageDirectory = $InstalledPackage.PackageDirectory
             TaskExitCode = if ($null -eq $TaskProcess) {
                 $null
@@ -1378,20 +1775,42 @@ function Invoke-SyncRunner {
                         -Uri ([string]$configuration.PackageUri)
                     if (Test-RemotePackageUpdateRequired -Remote $remote -State $state) {
                         Write-SyncRunnerLog -Root $root `
-                            -Message "New package detected at $($remote.LastModifiedUtc.ToString('O'))."
-                        $installed = Install-ClusterPackage `
-                            -PackageUri ([string]$configuration.PackageUri) `
-                            -ExecutionRoot $root `
-                            -RemoteMetadata $remote
+                            -Message (
+                                "New $($remote.UpdateDescriptor.ChangeType) package detected; " +
+                                "built $($remote.UpdateDescriptor.PackageBuiltUtc.ToString('O')), " +
+                                "SHA-256 $($remote.UpdateDescriptor.PackageSha256)."
+                            )
+                        if ($remote.UpdateDescriptor.ChangeType -ceq
+                            'commands-only') {
+                            $installed =
+                                Get-InstalledClusterPackageForCommandUpdate `
+                                    -ExecutionRoot $root `
+                                    -RemoteMetadata $remote `
+                                    -State $state
+                            Write-SyncRunnerLog -Root $root `
+                                -Message (
+                                    'Commands-only descriptor selected; package ' +
+                                    'download and binary replacement were skipped.'
+                                )
+                        }
+                        else {
+                            $installed = Install-ClusterPackage `
+                                -PackageUri ([string]$configuration.PackageUri) `
+                                -ExecutionRoot $root `
+                                -RemoteMetadata $remote
+                            Write-SyncRunnerLog -Root $root `
+                                -Message "Installed package '$($installed.PackageDirectory)'."
+                        }
                         Save-RefreshedBootstrapConfiguration `
                             -Path $resolvedConfigPath `
                             -Configuration $configuration `
                             -PackageConfiguration $installed
                         Write-SyncRunnerLog -Root $root `
-                            -Message "Installed package '$($installed.PackageDirectory)' and persisted both refreshed SAS URLs."
+                            -Message 'Persisted both refreshed SAS URLs from the update descriptor.'
                         $activeTaskProcess = Start-ClusterPackageTaskScript `
                             -PackageDirectory $installed.PackageDirectory `
-                            -BootstrapConfigPath $resolvedConfigPath
+                            -BootstrapConfigPath $resolvedConfigPath `
+                            -UpdateDescriptor $installed.UpdateDescriptor
                         if ($null -ne $activeTaskProcess) {
                             $activeInstallation = $installed
                             Write-SyncRunnerLog -Root $root `

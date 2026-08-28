@@ -45,7 +45,10 @@ public sealed class AzCopyProcessRunner : IAzCopyRunner
         var stopwatch = Stopwatch.StartNew();
         if (_operationLog is not null)
         {
-            await _operationLog.WriteCommandStartedAsync(executablePath, arguments);
+            await _operationLog.WriteCommandStartedAsync(
+                executablePath,
+                arguments,
+                includeArguments: mode != AzCopyProcessMode.SensitiveCaptured);
         }
 
         var startInfo = new ProcessStartInfo

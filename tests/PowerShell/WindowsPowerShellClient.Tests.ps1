@@ -11,7 +11,47 @@ Describe 'Windows PowerShell 5.1 cluster package runner' {
             '&sktid=00000000-0000-0000-0000-000000000002' +
             '&skt=2098-12-31T00%3A00%3A00Z&ske=2099-01-01T00%3A00%3A00Z' +
             '&sks=b&skv=2026-04-06&sig=test'
+        $testPackageUri =
+            'https://account123.blob.core.windows.net/sync-package/cluster_package.zip' +
+            $delegationSas
+        $testResultsUri =
+            'https://account123.blob.core.windows.net/sync/cluster-results/result.zip' +
+            $delegationSas.Replace('sp=r', 'sp=c')
         . $runnerPath
+
+        function New-TestUpdateDescriptorHeaders {
+            param(
+                [string]$ChangeType = 'binary',
+                [string[]]$ExecutionCommand
+            )
+
+            $headers = [Net.WebHeaderCollection]::new()
+            $headers['x-ms-meta-syncsaw_descriptor_version'] = '1'
+            $headers['x-ms-meta-syncsaw_package_sha256'] = ('a' * 64)
+            $headers['x-ms-meta-syncsaw_package_built_utc'] =
+                '2026-08-28T05:04:03Z'
+            $headers['x-ms-meta-syncsaw_change_type'] = $ChangeType
+            $bootstrapConfiguration = [ordered]@{
+                SchemaVersion = 6
+                PackageUri = $testPackageUri
+                ResultsBlobUri = $testResultsUri
+                IssuedUtc = '2026-08-28T05:04:03Z'
+                ExpiresUtc = '2026-09-04T00:00:00Z'
+            } | ConvertTo-Json -Compress
+            $headers['x-ms-meta-syncsaw_bootstrap_config'] =
+                [Convert]::ToBase64String(
+                    [Text.Encoding]::UTF8.GetBytes($bootstrapConfiguration)
+                )
+            if ($null -ne $ExecutionCommand) {
+                $headers['x-ms-meta-syncsaw_execution_command'] =
+                    [Convert]::ToBase64String(
+                        [Text.Encoding]::UTF8.GetBytes(
+                            ($ExecutionCommand | ConvertTo-Json -Compress)
+                        )
+                    )
+            }
+            return ,$headers
+        }
     }
 
     It 'parses every supported script with Windows PowerShell 5.1' {
@@ -256,6 +296,223 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             -State $state | Should -BeTrue
     }
 
+    It 'validates the versioned package update descriptor metadata' {
+        $binary = Get-ClusterPackageUpdateDescriptor `
+            -Headers (New-TestUpdateDescriptorHeaders) `
+            -CurrentPackageUri $testPackageUri
+        $binary.Version | Should -Be 1
+        $binary.PackageSha256 | Should -Be ('a' * 64)
+        $binary.PackageBuiltUtc | Should -Be (
+            [DateTimeOffset]'2026-08-28T05:04:03Z'
+        )
+        $binary.ChangeType | Should -Be 'binary'
+        $binary.ExecutionCommand | Should -BeNullOrEmpty
+        $binary.BootstrapConfiguration.PackageUri |
+            Should -Be $testPackageUri
+        $binary.BootstrapConfiguration.ResultsBlobUri |
+            Should -Be $testResultsUri
+
+        $command = @(
+            'powershell.exe',
+            '-NoLogo',
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'RemoteSigned',
+            '-File',
+            'task.ps1',
+            '-BootstrapConfigPath',
+            '{BootstrapConfigPath}',
+            '-Mode',
+            'quick run'
+        )
+        $commandsOnly = Get-ClusterPackageUpdateDescriptor `
+            -Headers (
+                New-TestUpdateDescriptorHeaders `
+                    -ChangeType 'commands-only' `
+                    -ExecutionCommand $command
+            ) `
+            -CurrentPackageUri $testPackageUri
+        $commandsOnly.ExecutionCommand | Should -Be $command
+
+        $invalid = New-TestUpdateDescriptorHeaders
+        $invalid['x-ms-meta-syncsaw_package_sha256'] = 'not-a-hash'
+        {
+            Get-ClusterPackageUpdateDescriptor `
+                -Headers $invalid `
+                -CurrentPackageUri $testPackageUri
+        } | Should -Throw '*SHA-256*'
+
+        $oversized = New-TestUpdateDescriptorHeaders
+        $oversized['x-ms-meta-extra'] = 'x' * 8192
+        {
+            Get-ClusterPackageUpdateDescriptor `
+                -Headers $oversized `
+                -CurrentPackageUri $testPackageUri
+        } | Should -Throw '*8,192-byte*'
+
+        $invalidBootstrap = New-TestUpdateDescriptorHeaders
+        $invalidBootstrap['x-ms-meta-syncsaw_bootstrap_config'] = 'not-base64'
+        {
+            Get-ClusterPackageUpdateDescriptor `
+                -Headers $invalidBootstrap `
+                -CurrentPackageUri $testPackageUri
+        } | Should -Throw '*bootstrap configuration metadata is invalid*'
+
+        $unsafeCommand = @($command)
+        $unsafeCommand[6] = 'other.ps1'
+        {
+            Get-ClusterPackageUpdateDescriptor `
+                -Headers (
+                    New-TestUpdateDescriptorHeaders `
+                        -ChangeType 'commands-only' `
+                        -ExecutionCommand $unsafeCommand
+                ) `
+                -CurrentPackageUri $testPackageUri
+        } | Should -Throw '*cannot change*entrypoint*'
+    }
+
+    It 'hashes the downloaded package and safely quotes command-only arguments' {
+        $packagePath = Join-Path $TestDrive 'hash-input.zip'
+        [IO.File]::WriteAllText($packagePath, 'package bytes')
+        $expectedHash = [BitConverter]::ToString(
+            [Security.Cryptography.SHA256]::Create().ComputeHash(
+                [Text.Encoding]::UTF8.GetBytes('package bytes')
+            )
+        ).Replace('-', '').ToLowerInvariant()
+        Get-SyncRunnerFileSha256 -Path $packagePath | Should -Be $expectedHash
+
+        ConvertTo-SyncRunnerNativeArgument -Value 'simple' |
+            Should -Be 'simple'
+        ConvertTo-SyncRunnerNativeArgument -Value 'quick run' |
+            Should -Be '"quick run"'
+        ConvertTo-SyncRunnerNativeArgument -Value 'C:\path with space\' |
+            Should -Be '"C:\path with space\\"'
+    }
+
+    It 'applies a validated command-only descriptor to the next task run' {
+        $packageDirectory = New-Item -ItemType Directory `
+            -Path (Join-Path $TestDrive 'command package')
+        @'
+param(
+    [Parameter(Mandatory)][string]$BootstrapConfigPath,
+    [Parameter(Mandatory)][string]$Mode
+)
+if ($Mode -cne 'quick run') { exit 9 }
+exit 0
+'@ | Set-Content `
+            -LiteralPath (Join-Path $packageDirectory 'task.ps1') `
+            -Encoding UTF8
+        $descriptor = Get-ClusterPackageUpdateDescriptor `
+            -Headers (
+                New-TestUpdateDescriptorHeaders `
+                    -ChangeType 'commands-only' `
+                    -ExecutionCommand @(
+                        'powershell.exe',
+                        '-NoLogo',
+                        '-NoProfile',
+                        '-ExecutionPolicy',
+                        'RemoteSigned',
+                        '-File',
+                        'task.ps1',
+                        '-BootstrapConfigPath',
+                        '{BootstrapConfigPath}',
+                        '-Mode',
+                        'quick run'
+                    )
+            ) `
+            -CurrentPackageUri $testPackageUri
+
+        $process = Start-ClusterPackageTaskScript `
+            -PackageDirectory $packageDirectory `
+            -BootstrapConfigPath (Join-Path $TestDrive 'bootstrap config.json') `
+            -UpdateDescriptor $descriptor
+        $process.WaitForExit()
+        $process.ExitCode | Should -Be 0
+        $process.Dispose()
+    }
+
+    It 'uses the installed binary for command-only metadata without downloading' {
+        $executionRoot = New-Item -ItemType Directory `
+            -Path (Join-Path $TestDrive 'execution-root')
+        $packageDirectory = New-Item -ItemType Directory `
+            -Path (Join-Path $executionRoot 'packages\binary-1') `
+            -Force
+        'param([string]$BootstrapConfigPath, [string]$Mode); exit 0' |
+            Set-Content `
+                -LiteralPath (Join-Path $packageDirectory 'task.ps1') `
+                -Encoding UTF8
+        $descriptor = Get-ClusterPackageUpdateDescriptor `
+            -Headers (
+                New-TestUpdateDescriptorHeaders `
+                    -ChangeType 'commands-only' `
+                    -ExecutionCommand @(
+                        'powershell.exe',
+                        '-NoLogo',
+                        '-NoProfile',
+                        '-ExecutionPolicy',
+                        'RemoteSigned',
+                        '-File',
+                        'task.ps1',
+                        '-BootstrapConfigPath',
+                        '{BootstrapConfigPath}',
+                        '-Mode',
+                        'quick run'
+                    )
+            ) `
+            -CurrentPackageUri $testPackageUri
+        $remote = [pscustomobject]@{
+            ETag = '"commands-2"'
+            LastModifiedUtc = [DateTimeOffset]'2026-08-28T05:04:03Z'
+            UpdateDescriptor = $descriptor
+        }
+        $state = @{
+            PackageDirectory = $packageDirectory.FullName
+            PackageSha256 = 'b' * 64
+            InstalledPackageSha256 = 'b' * 64
+        }
+
+        $selected = Get-InstalledClusterPackageForCommandUpdate `
+            -ExecutionRoot $executionRoot `
+            -RemoteMetadata $remote `
+            -State $state
+        $selected.PackageDirectory | Should -Be $packageDirectory.FullName
+        $selected.InstalledPackageSha256 | Should -Be ('b' * 64)
+        $selected.Metadata.ETag | Should -Be '"commands-2"'
+        $selected.ResultsBlobUri | Should -Be $testResultsUri
+
+        $persistedConfigPath = Join-Path $TestDrive 'command-bootstrap.json'
+        $persistedConfig = @{
+            PackageUri = 'old package'
+            ResultsBlobUri = 'old result'
+            IntervalSeconds = 10
+        }
+        Save-RefreshedBootstrapConfiguration `
+            -Path $persistedConfigPath `
+            -Configuration $persistedConfig `
+            -PackageConfiguration $selected
+        $saved = Read-SyncRunnerJson -Path $persistedConfigPath
+        $saved.PackageUri | Should -Be $testPackageUri
+        $saved.ResultsBlobUri | Should -Be $testResultsUri
+
+        $statePath = Join-Path $TestDrive 'command-state.json'
+        Save-CompletedPackageState `
+            -Path $statePath `
+            -InstalledPackage $selected `
+            -TaskProcess $null
+        $completedState = Read-SyncRunnerJson -Path $statePath
+        $completedState.SchemaVersion | Should -Be 2
+        $completedState.PackageSha256 | Should -Be ('a' * 64)
+        $completedState.InstalledPackageSha256 | Should -Be ('b' * 64)
+        $completedState.ChangeType | Should -Be 'commands-only'
+
+        {
+            Get-InstalledClusterPackageForCommandUpdate `
+                -ExecutionRoot $executionRoot `
+                -RemoteMetadata $remote `
+                -State $null
+        } | Should -Throw '*requires a previously installed binary package*'
+    }
+
     It 'extracts safe entries and blocks archive traversal' {
         Add-Type -AssemblyName System.IO.Compression
         $safeArchive = Join-Path $TestDrive 'safe.zip'
@@ -314,7 +571,7 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             'https://account123.blob.core.windows.net/sync/cluster-results/result.zip' +
             $delegationSas.Replace('sp=r', 'sp=c')
         @{
-            SchemaVersion = 5
+            SchemaVersion = 6
             PackageUri = $next
             ResultsBlobUri = $results
             IssuedUtc = '2026-08-28T00:00:00Z'
@@ -330,7 +587,7 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             Should -Be $next
 
         @{
-            SchemaVersion = 4
+            SchemaVersion = 5
             PackageUri = $next
             ResultsBlobUri = $results
             IssuedUtc = '2026-08-28T00:00:00Z'
@@ -345,7 +602,7 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         } | Should -Throw '*unsupported schema*'
 
         @{
-            SchemaVersion = 5
+            SchemaVersion = 6
             PackageUri = $next.Replace('account123', 'otheraccount')
             ResultsBlobUri = $results
             IssuedUtc = '2026-08-28T00:00:00Z'
@@ -450,6 +707,13 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         $stagedHarnessIndex = $content.IndexOf(
             '[void](Assert-TaskScriptSafety -Path $stagedTaskScript)'
         )
+        $packageHashIndex = $content.IndexOf(
+            '$actualPackageSha256 = Get-SyncRunnerFileSha256'
+        )
+        $expandIndex = $content.IndexOf(
+            'Expand-ClusterPackageSafely',
+            $packageHashIndex
+        )
         $installMoveIndex = $content.IndexOf('[IO.Directory]::Move($stagingPath')
         $taskIndex = $content.IndexOf(
             '$activeTaskProcess = Start-ClusterPackageTaskScript'
@@ -460,12 +724,17 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         $startIndex = $content.IndexOf('return Start-Process', $harnessIndex)
         $completedStateIndex = $content.IndexOf('TaskExitCode = if')
         $stagedHarnessIndex | Should -BeGreaterThan -1
+        $packageHashIndex | Should -BeGreaterThan -1
+        $expandIndex | Should -BeGreaterThan $packageHashIndex
         $installMoveIndex | Should -BeGreaterThan $stagedHarnessIndex
         $taskIndex | Should -BeGreaterThan -1
         $harnessIndex | Should -BeGreaterThan -1
         $startIndex | Should -BeGreaterThan $harnessIndex
         $completedStateIndex | Should -BeLessThan $taskIndex
-        $content | Should -Match '-BootstrapConfigPath "\{1\}"'
+        $content | Should -Match '\$command\[8\] = \$BootstrapConfigPath'
+        $content | Should -Match 'WindowsPowerShell\\v1\.0\\powershell\.exe'
+        $content | Should -Match '-UpdateDescriptor \$installed\.UpdateDescriptor'
+        $content | Should -Match 'Get-InstalledClusterPackageForCommandUpdate'
         $content | Should -Not -Match '-WorkingDirectory \$PackageDirectory `\s+-Wait'
         $content | Should -Match 'task\.ps1 is still running; package polling was skipped'
         $content | Should -Match 'Initialize-SecureDirectory'

@@ -86,6 +86,24 @@ public sealed class AzCopyArgumentsTests
     }
 
     [Fact]
+    public void Copy_AddsBlobMetadataAsOneDiscreteArgument()
+    {
+        var arguments = AzCopyArguments.Copy(
+            @"C:\package.zip",
+            "https://account123.blob.core.windows.net/container/package.zip",
+            new Dictionary<string, string>
+            {
+                ["z_key"] = "last",
+                ["a_key"] = "first"
+            });
+
+        var argumentArray = arguments.ToArray();
+        var metadataIndex = Array.IndexOf(argumentArray, "--metadata");
+        Assert.True(metadataIndex > 0);
+        Assert.Equal("a_key=first;z_key=last", argumentArray[metadataIndex + 1]);
+    }
+
+    [Fact]
     public void AzureCliLogin_UsesTenantAsASeparateArgument()
     {
         var arguments = AzCopyArguments.AzureCliLogin("tenant-id");

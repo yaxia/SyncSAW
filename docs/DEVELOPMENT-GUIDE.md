@@ -54,8 +54,10 @@ supports PowerShell 7 on SAW devices and remains syntactically compatible with
 Windows PowerShell 5.1 where the required Az modules are available.
 
 The cluster workflow is separate from normal synchronization. The stable
-`bootstrap.ps1` runner downloads a versioned package, validates it, persists
-rotated exact-Blob SAS URLs, and executes package-root `task.ps1`. See the
+`bootstrap.ps1` runner validates the versioned Blob metadata descriptor first.
+Binary updates are conditionally downloaded, hash-verified, installed, and used
+for SAS rollover. Commands-only updates skip download and run the last installed
+package's `task.ps1` with validated metadata arguments. See the
 [agent guide](AGENT-GUIDE.md) before changing this protocol.
 
 ## Build and test
@@ -135,8 +137,9 @@ Add or update targeted tests for changes involving:
 - Non-overlapping scheduling and single-instance activation.
 - Settings migration and secret redaction.
 - SAW marker/deletion behavior.
-- Cluster archive construction, SAS scope, rollover, safety checks, and
-  execution gating.
+- Cluster archive construction, update descriptor metadata/limits, binary
+  hash verification, command-only no-download selection, SAS scope, rollover,
+  safety checks, and execution gating.
 
 Documentation-only changes do not require a product build, but links, fenced
 blocks, and repository-relative paths should still be checked.

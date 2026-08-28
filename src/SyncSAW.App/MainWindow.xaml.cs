@@ -460,10 +460,14 @@ public partial class MainWindow : Window
             var payloadFingerprint = _clusterPackagePublisher.GetPayloadFingerprint(
                 settings.LocalFolder,
                 cancellationToken);
+            var previousFingerprintKnown =
+                !string.IsNullOrEmpty(_lastClusterPackageFingerprint);
+            var payloadChanged = previousFingerprintKnown &&
+                !payloadFingerprint.Equals(
+                _lastClusterPackageFingerprint,
+                StringComparison.Ordinal);
             if (now < _nextClusterPackagePublishUtc &&
-                payloadFingerprint.Equals(
-                    _lastClusterPackageFingerprint,
-                    StringComparison.Ordinal))
+                !payloadChanged)
             {
                 return null;
             }
@@ -471,7 +475,8 @@ public partial class MainWindow : Window
             var publication = await _clusterPackagePublisher.PublishAsync(
                 settings,
                 now,
-                cancellationToken);
+                cancellationToken,
+                forceBinaryUpdate: !previousFingerprintKnown || !payloadChanged);
             if (configurationVersion == Volatile.Read(ref _clusterPackageConfigurationVersion))
             {
                 _nextClusterPackagePublishUtc = now.Add(ClusterPackage.PublishInterval);
@@ -480,7 +485,9 @@ public partial class MainWindow : Window
             }
             await _operationLog.WriteEventAsync(
                 $"Published {ClusterPackage.BlobName} with " +
-                $"{publication.PayloadFileCount} payload files; embedded SAS values expire " +
+                $"{publication.PayloadFileCount} payload files, " +
+                $"{publication.UpdateDescriptor.ChangeType} update descriptor, and package SHA-256 " +
+                $"{publication.UpdateDescriptor.PackageSha256}; descriptor SAS values expire " +
                 $"{publication.SasExpiresUtc:O}.");
             return publication;
         }

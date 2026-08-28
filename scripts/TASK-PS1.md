@@ -13,7 +13,7 @@ The package's generated `cluster_package.config` contains:
 
 ```json
 {
-  "SchemaVersion": 5,
+  "SchemaVersion": 6,
   "PackageUri": "https://.../cluster_package.zip?<read-only-SAS>",
   "ResultsBlobUri": "https://.../<results-container>/cluster-results/<id>.zip?<create-only-SAS>",
   "IssuedUtc": "...",
@@ -21,7 +21,7 @@ The package's generated `cluster_package.config` contains:
 }
 ```
 
-Schema version 5 is required. It separates the persistent `bootstrap.ps1`
+Schema version 6 is required. It separates the persistent `bootstrap.ps1`
 poller from the package's `task.ps1` workload.
 
 The runner starts `task.ps1` with `-BootstrapConfigPath` pointing to its
@@ -38,6 +38,32 @@ General settings shared by every task, including `TaskExecutionPath` and
 `OutputPath`, remain in `bootstrap.config.json` and survive SAS rollover. Root
 `task.config.json` is package-only like `task.ps1`: normal synchronization
 excludes it, while the cluster package publisher includes it.
+
+The publisher also reads these reserved `task.config.json` properties:
+
+```json
+{
+  "ResultPrefix": "result",
+  "PackageChangeType": "CommandsOnly",
+  "ExecutionArguments": ["-Mode", "quick-run"]
+}
+```
+
+`Binary` is the default and is required whenever any package content changes.
+`CommandsOnly` is valid only for a parameter-only round using the previously
+installed package. In that mode bootstrap does not download the new ZIP or
+updated `task.config.json`; it obtains the validated argument tokens from the
+Blob update descriptor and invokes the installed `task.ps1`. Therefore declare
+the corresponding parameters in the already installed task script. A
+commands-only descriptor cannot change the executable, script entrypoint,
+execution policy, or required `-BootstrapConfigPath`.
+
+Before either update type runs, bootstrap validates
+`syncsaw_bootstrap_config` from Blob metadata and persists its refreshed
+package-read and exact result-create SAS URLs to external
+`bootstrap.config.json`. This gives every command-only round a new result Blob
+without downloading package content. The Base64 metadata value is not
+encryption and must never be logged or copied.
 
 By default, that exact Blob is under `cluster-results/` in the container already
 monitored by the desktop app and `Sync-SAW.ps1`. Both clients therefore download

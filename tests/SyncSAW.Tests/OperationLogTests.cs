@@ -17,6 +17,10 @@ public sealed class OperationLogTests
                     "copy",
                     "https://account.blob.core.windows.net/container?sv=1&sig=secret"
                 ]);
+            await log.WriteCommandStartedAsync(
+                "azcopy.exe",
+                ["--metadata", "opaque-secret"],
+                includeArguments: false);
             await log.WriteCommandCompletedAsync(
                 new AzCopyCommandResult(
                     1,
@@ -31,7 +35,9 @@ public sealed class OperationLogTests
             Assert.Contains("upload summary", content);
             Assert.Contains("request failed", content);
             Assert.DoesNotContain("secret", content);
+            Assert.DoesNotContain("opaque-secret", content);
             Assert.Contains("<redacted>", content);
+            Assert.Contains("<arguments redacted>", content);
         }
         finally
         {

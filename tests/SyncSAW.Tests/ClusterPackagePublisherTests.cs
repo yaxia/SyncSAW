@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text.Json;
 using SyncSAW.Core;
 
@@ -35,12 +36,29 @@ public sealed class ClusterPackagePublisherTests
             Assert.Equal(
                 ClusterPackage.DefaultResultBlobPrefix,
                 ClusterPackage.GetResultBlobPrefix(directory.FullName));
+            var defaults = ClusterPackage.GetTaskConfiguration(directory.FullName);
+            Assert.Equal(ClusterPackageChangeType.Binary, defaults.ChangeType);
+            Assert.Empty(defaults.ExecutionArguments);
             await File.WriteAllTextAsync(
                 Path.Combine(directory.FullName, ClusterPackage.TaskConfigurationName),
                 """{"ResultPrefix":"RocksDB-SPDIPerf"}""");
             Assert.Equal(
                 "RocksDB-SPDIPerf",
                 ClusterPackage.GetResultBlobPrefix(directory.FullName));
+            await File.WriteAllTextAsync(
+                Path.Combine(directory.FullName, ClusterPackage.TaskConfigurationName),
+                """
+                {
+                  "ResultPrefix": "RocksDB-SPDIPerf",
+                  "PackageChangeType": "CommandsOnly",
+                  "ExecutionArguments": ["-Mode", "quick run", "-Iterations", "2"]
+                }
+                """);
+            var commandsOnly = ClusterPackage.GetTaskConfiguration(directory.FullName);
+            Assert.Equal(ClusterPackageChangeType.CommandsOnly, commandsOnly.ChangeType);
+            Assert.Equal(
+                ["-Mode", "quick run", "-Iterations", "2"],
+                commandsOnly.ExecutionArguments);
             await File.WriteAllTextAsync(
                 Path.Combine(directory.FullName, ClusterPackage.TaskConfigurationName),
                 """{"ResultPrefix":"bad prefix"}""");
@@ -51,6 +69,110 @@ public sealed class ClusterPackagePublisherTests
         {
             directory.Delete(recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task UpdateDescriptor_HashesPackageAndEncodesCommandsWithinMetadataLimit()
+    {
+        var directory = Directory.CreateTempSubdirectory("SyncSAW.Descriptor.");
+        try
+        {
+            var archivePath = Path.Combine(directory.FullName, "package.zip");
+            await File.WriteAllTextAsync(archivePath, "package bytes");
+            var builtUtc = DateTimeOffset.Parse("2026-08-28T04:05:06Z");
+            var descriptor = ClusterPackage.CreateUpdateDescriptor(
+                archivePath,
+                builtUtc,
+                new ClusterPackageTaskConfiguration(
+                    "result",
+                    ClusterPackageChangeType.CommandsOnly,
+                    ["-Mode", "quick run"]),
+                new Uri("https://account123.blob.core.windows.net/sync-package/cluster_package.zip?sp=r"),
+                new Uri("https://account123.blob.core.windows.net/sync/cluster-results/result.zip?sp=c"),
+                builtUtc.AddDays(7));
+            var metadata = ClusterPackage.GetUpdateDescriptorMetadata(descriptor);
+
+            Assert.Equal(
+                Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(archivePath)))
+                    .ToLowerInvariant(),
+                descriptor.PackageSha256);
+            Assert.Equal("1", metadata[ClusterPackage.DescriptorVersionMetadataKey]);
+            Assert.Equal(
+                descriptor.PackageSha256,
+                metadata[ClusterPackage.PackageSha256MetadataKey]);
+            Assert.Equal(
+                "2026-08-28T04:05:06.0000000+00:00",
+                metadata[ClusterPackage.PackageBuiltUtcMetadataKey]);
+            Assert.Equal("commands-only", metadata[ClusterPackage.ChangeTypeMetadataKey]);
+            var bootstrapConfiguration =
+                JsonSerializer.Deserialize<ClusterPackageBootstrapConfiguration>(
+                    Convert.FromBase64String(
+                        metadata[ClusterPackage.BootstrapConfigurationMetadataKey]));
+            Assert.NotNull(bootstrapConfiguration);
+            Assert.Equal(
+                ClusterPackage.ConfigurationSchemaVersion,
+                bootstrapConfiguration.SchemaVersion);
+            Assert.Equal(
+                "https://account123.blob.core.windows.net/sync/cluster-results/result.zip?sp=c",
+                bootstrapConfiguration.ResultsBlobUri);
+            var executionCommand = JsonSerializer.Deserialize<string[]>(
+                Convert.FromBase64String(
+                    metadata[ClusterPackage.ExecutionCommandMetadataKey]));
+            Assert.Equal(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "RemoteSigned",
+                    "-File",
+                    "task.ps1",
+                    "-BootstrapConfigPath",
+                    ClusterPackage.BootstrapConfigPlaceholder,
+                    "-Mode",
+                    "quick run"
+                ],
+                executionCommand);
+            Assert.True(metadata.Sum(item => item.Key.Length + item.Value.Length) <=
+                ClusterPackage.MaximumBlobMetadataBytes);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void UpdateDescriptor_RejectsMetadataBeyondAzureLimit()
+    {
+        var command = new[]
+        {
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "RemoteSigned",
+            "-File",
+            ClusterPackage.TaskScriptName,
+            "-BootstrapConfigPath",
+            ClusterPackage.BootstrapConfigPlaceholder
+        }.Concat(Enumerable.Repeat(new string('x', 1024), 8)).ToArray();
+        var descriptor = new ClusterPackageUpdateDescriptor(
+            new string('a', 64),
+            DateTimeOffset.UtcNow,
+            ClusterPackageChangeType.CommandsOnly,
+            command,
+            new(
+                ClusterPackage.ConfigurationSchemaVersion,
+                "https://account123.blob.core.windows.net/sync-package/cluster_package.zip?sp=r",
+                "https://account123.blob.core.windows.net/sync/cluster-results/result.zip?sp=c",
+                DateTimeOffset.UtcNow,
+                DateTimeOffset.UtcNow.AddDays(7)));
+
+        var exception = Assert.Throws<InvalidDataException>(
+            () => ClusterPackage.GetUpdateDescriptorMetadata(descriptor));
+
+        Assert.Contains("8,192-byte", exception.Message);
     }
 
     [Fact]
@@ -118,7 +240,12 @@ public sealed class ClusterPackagePublisherTests
                 "exit 0");
             await File.WriteAllTextAsync(
                 Path.Combine(source.FullName, ClusterPackage.TaskConfigurationName),
-                "{}");
+                """
+                {
+                  "PackageChangeType": "CommandsOnly",
+                  "ExecutionArguments": ["-Mode", "quick run"]
+                }
+                """);
             Directory.CreateDirectory(Path.Combine(source.FullName, "data"));
             await File.WriteAllTextAsync(
                 Path.Combine(source.FullName, "data", "payload.txt"),
@@ -162,10 +289,15 @@ public sealed class ClusterPackagePublisherTests
             var publisher = new ClusterPackagePublisher(runner);
             var settings = CreateSettings(directory, source.FullName);
 
-            var result = await publisher.PublishAsync(settings, now, CancellationToken.None);
+            var result = await publisher.PublishAsync(
+                settings,
+                now,
+                CancellationToken.None,
+                forceBinaryUpdate: true);
 
             Assert.Equal(3, result.PayloadFileCount);
             Assert.Equal(expectedExpiry, result.SasExpiresUtc);
+            Assert.Equal(ClusterPackageChangeType.Binary, result.UpdateDescriptor.ChangeType);
             Assert.Equal(
                 ["storage", "container", "create"],
                 runner.Calls[0].Arguments.Skip(2).Take(3));
@@ -211,6 +343,27 @@ public sealed class ClusterPackagePublisherTests
                 "https://account123.blob.core.windows.net/container-package/cluster_package.zip",
                 runner.Calls[5].Arguments[2]);
             Assert.Equal("AZCLI", runner.Calls[5].Environment?["AZCOPY_AUTO_LOGIN_TYPE"]);
+            Assert.Equal(AzCopyProcessMode.SensitiveCaptured, runner.Calls[5].Mode);
+            var uploadArguments = runner.Calls[5].Arguments.ToArray();
+            var metadataIndex = Array.IndexOf(uploadArguments, "--metadata");
+            Assert.True(metadataIndex > 0);
+            var metadataArgument = uploadArguments[metadataIndex + 1];
+            Assert.Contains(
+                $"{ClusterPackage.DescriptorVersionMetadataKey}=1",
+                metadataArgument);
+            Assert.Contains(
+                $"{ClusterPackage.PackageSha256MetadataKey}=" +
+                result.UpdateDescriptor.PackageSha256,
+                metadataArgument);
+            Assert.Contains(
+                $"{ClusterPackage.ChangeTypeMetadataKey}=binary",
+                metadataArgument);
+            Assert.Contains(
+                $"{ClusterPackage.BootstrapConfigurationMetadataKey}=",
+                metadataArgument);
+            Assert.DoesNotContain(
+                ClusterPackage.ExecutionCommandMetadataKey,
+                metadataArgument);
 
             using var archive = ZipFile.OpenRead(capturedArchive);
             var names = archive.Entries.Select(entry => entry.FullName).ToArray();
@@ -236,6 +389,10 @@ public sealed class ClusterPackagePublisherTests
             Assert.Equal(
                 runner.GeneratedResultsSasUri,
                 config.RootElement.GetProperty("ResultsBlobUri").GetString());
+            Assert.Equal(
+                Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(capturedArchive)))
+                    .ToLowerInvariant(),
+                result.UpdateDescriptor.PackageSha256);
         }
         finally
         {

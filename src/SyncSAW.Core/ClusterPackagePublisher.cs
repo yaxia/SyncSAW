@@ -5,13 +5,49 @@ using System.Text.Json;
 
 namespace SyncSAW.Core;
 
+public enum ClusterPackageChangeType
+{
+    Binary,
+    CommandsOnly
+}
+
+public sealed record ClusterPackageTaskConfiguration(
+    string ResultPrefix,
+    ClusterPackageChangeType ChangeType,
+    IReadOnlyList<string> ExecutionArguments);
+
+public sealed record ClusterPackageUpdateDescriptor(
+    string PackageSha256,
+    DateTimeOffset PackageBuiltUtc,
+    ClusterPackageChangeType ChangeType,
+    IReadOnlyList<string>? ExecutionCommand,
+    ClusterPackageBootstrapConfiguration BootstrapConfiguration);
+
+public sealed record ClusterPackageBootstrapConfiguration(
+    int SchemaVersion,
+    string PackageUri,
+    string ResultsBlobUri,
+    DateTimeOffset IssuedUtc,
+    DateTimeOffset ExpiresUtc);
+
 public static class ClusterPackage
 {
     public const string BlobName = "cluster_package.zip";
     public const string ConfigurationEntryName = "cluster_package.config";
     public const string TaskScriptName = "task.ps1";
     public const string TaskConfigurationName = "task.config.json";
-    public const int ConfigurationSchemaVersion = 5;
+    public const int ConfigurationSchemaVersion = 6;
+    public const int UpdateDescriptorVersion = 1;
+    public const int MaximumBlobMetadataBytes = 8 * 1024;
+    public const int MaximumExecutionArguments = 32;
+    public const int MaximumExecutionArgumentBytes = 1024;
+    public const string BootstrapConfigPlaceholder = "{BootstrapConfigPath}";
+    public const string DescriptorVersionMetadataKey = "syncsaw_descriptor_version";
+    public const string PackageSha256MetadataKey = "syncsaw_package_sha256";
+    public const string PackageBuiltUtcMetadataKey = "syncsaw_package_built_utc";
+    public const string ChangeTypeMetadataKey = "syncsaw_change_type";
+    public const string ExecutionCommandMetadataKey = "syncsaw_execution_command";
+    public const string BootstrapConfigurationMetadataKey = "syncsaw_bootstrap_config";
     public static readonly TimeSpan PublishInterval = TimeSpan.FromDays(1);
     public static readonly TimeSpan SasLifetime = TimeSpan.FromDays(7);
     public const long MaximumArchiveBytes = 2L * 1024 * 1024 * 1024;
@@ -64,33 +100,199 @@ public static class ClusterPackage
     public static string GetResultsContainerName(string syncContainer) =>
         StorageEndpoint.NormalizeContainer(syncContainer);
 
-    public static string GetResultBlobPrefix(string sourceRoot)
+    public static ClusterPackageTaskConfiguration GetTaskConfiguration(string sourceRoot)
     {
         var path = Path.Combine(Path.GetFullPath(sourceRoot), TaskConfigurationName);
         if (!File.Exists(path))
         {
-            return DefaultResultBlobPrefix;
+            return new(
+                DefaultResultBlobPrefix,
+                ClusterPackageChangeType.Binary,
+                []);
         }
 
         using var document = JsonDocument.Parse(File.ReadAllText(path));
-        if (!document.RootElement.TryGetProperty("ResultPrefix", out var property))
+        if (document.RootElement.ValueKind != JsonValueKind.Object)
         {
-            return DefaultResultBlobPrefix;
+            throw new InvalidDataException("task.config.json must contain a JSON object.");
         }
 
-        var prefix = property.GetString()?.Trim();
-        if (string.IsNullOrWhiteSpace(prefix) ||
-            prefix.Length > 64 ||
-            !char.IsAsciiLetterOrDigit(prefix[0]) ||
-            !prefix.All(character =>
-                char.IsAsciiLetterOrDigit(character) ||
-                character is '.' or '_' or '-'))
+        var prefix = DefaultResultBlobPrefix;
+        if (document.RootElement.TryGetProperty("ResultPrefix", out var prefixProperty))
+        {
+            if (prefixProperty.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidDataException("task.config.json ResultPrefix must be a string.");
+            }
+            prefix = prefixProperty.GetString()?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(prefix) ||
+                prefix.Length > 64 ||
+                !char.IsAsciiLetterOrDigit(prefix[0]) ||
+                !prefix.All(character =>
+                    char.IsAsciiLetterOrDigit(character) ||
+                    character is '.' or '_' or '-'))
+            {
+                throw new InvalidDataException(
+                    "task.config.json ResultPrefix must contain 1-64 letters, digits, periods, " +
+                    "underscores, or hyphens.");
+            }
+        }
+
+        var changeType = ClusterPackageChangeType.Binary;
+        if (document.RootElement.TryGetProperty("PackageChangeType", out var changeProperty))
+        {
+            if (changeProperty.ValueKind != JsonValueKind.String ||
+                !Enum.TryParse(
+                    changeProperty.GetString()?.Replace("-", string.Empty),
+                    ignoreCase: true,
+                    out changeType))
+            {
+                throw new InvalidDataException(
+                    "task.config.json PackageChangeType must be 'Binary' or 'CommandsOnly'.");
+            }
+        }
+
+        var executionArguments = new List<string>();
+        if (document.RootElement.TryGetProperty(
+                "ExecutionArguments",
+                out var argumentsProperty))
+        {
+            if (argumentsProperty.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidDataException(
+                    "task.config.json ExecutionArguments must be an array of strings.");
+            }
+            foreach (var item in argumentsProperty.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.String)
+                {
+                    throw new InvalidDataException(
+                        "task.config.json ExecutionArguments must contain only strings.");
+                }
+                var argument = item.GetString() ?? string.Empty;
+                if (Encoding.UTF8.GetByteCount(argument) > MaximumExecutionArgumentBytes ||
+                    argument.Any(char.IsControl))
+                {
+                    throw new InvalidDataException(
+                        $"Each task.config.json execution argument must contain at most " +
+                        $"{MaximumExecutionArgumentBytes} UTF-8 bytes and no control characters.");
+                }
+                if (argument.Equals(
+                        "-BootstrapConfigPath",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        "ExecutionArguments cannot replace the required BootstrapConfigPath.");
+                }
+                executionArguments.Add(argument);
+            }
+        }
+        if (executionArguments.Count > MaximumExecutionArguments)
         {
             throw new InvalidDataException(
-                "task.config.json ResultPrefix must contain 1-64 letters, digits, periods, " +
-                "underscores, or hyphens.");
+                $"task.config.json supports at most {MaximumExecutionArguments} execution arguments.");
         }
-        return prefix;
+        if (changeType == ClusterPackageChangeType.CommandsOnly &&
+            executionArguments.Count == 0)
+        {
+            throw new InvalidDataException(
+                "CommandsOnly updates must provide at least one ExecutionArguments value.");
+        }
+        if (changeType == ClusterPackageChangeType.Binary &&
+            executionArguments.Count > 0)
+        {
+            throw new InvalidDataException(
+                "ExecutionArguments are allowed only when PackageChangeType is CommandsOnly.");
+        }
+
+        return new(prefix, changeType, executionArguments);
+    }
+
+    public static string GetResultBlobPrefix(string sourceRoot) =>
+        GetTaskConfiguration(sourceRoot).ResultPrefix;
+
+    public static ClusterPackageUpdateDescriptor CreateUpdateDescriptor(
+        string archivePath,
+        DateTimeOffset packageBuiltUtc,
+        ClusterPackageTaskConfiguration taskConfiguration,
+        Uri packageUri,
+        Uri resultsBlobUri,
+        DateTimeOffset expiresUtc)
+    {
+        using var stream = File.OpenRead(archivePath);
+        var packageSha256 = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+        IReadOnlyList<string>? executionCommand = null;
+        if (taskConfiguration.ChangeType == ClusterPackageChangeType.CommandsOnly)
+        {
+            executionCommand =
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "RemoteSigned",
+                "-File",
+                TaskScriptName,
+                "-BootstrapConfigPath",
+                BootstrapConfigPlaceholder,
+                .. taskConfiguration.ExecutionArguments
+            ];
+        }
+        return new(
+            packageSha256,
+            packageBuiltUtc.ToUniversalTime(),
+            taskConfiguration.ChangeType,
+            executionCommand,
+            new(
+                ConfigurationSchemaVersion,
+                packageUri.AbsoluteUri,
+                resultsBlobUri.AbsoluteUri,
+                packageBuiltUtc.ToUniversalTime(),
+                expiresUtc.ToUniversalTime()));
+    }
+
+    public static IReadOnlyDictionary<string, string> GetUpdateDescriptorMetadata(
+        ClusterPackageUpdateDescriptor descriptor)
+    {
+        var metadata = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [DescriptorVersionMetadataKey] = UpdateDescriptorVersion.ToString(),
+            [PackageSha256MetadataKey] = descriptor.PackageSha256,
+            [PackageBuiltUtcMetadataKey] = descriptor.PackageBuiltUtc.ToString("O"),
+            [BootstrapConfigurationMetadataKey] = Convert.ToBase64String(
+                JsonSerializer.SerializeToUtf8Bytes(descriptor.BootstrapConfiguration)),
+            [ChangeTypeMetadataKey] = descriptor.ChangeType switch
+            {
+                ClusterPackageChangeType.Binary => "binary",
+                ClusterPackageChangeType.CommandsOnly => "commands-only",
+                _ => throw new InvalidDataException("Unsupported cluster package change type.")
+            }
+        };
+        if (descriptor.ChangeType == ClusterPackageChangeType.CommandsOnly)
+        {
+            if (descriptor.ExecutionCommand is null)
+            {
+                throw new InvalidDataException(
+                    "Commands-only descriptors require an execution command.");
+            }
+            metadata[ExecutionCommandMetadataKey] = Convert.ToBase64String(
+                JsonSerializer.SerializeToUtf8Bytes(descriptor.ExecutionCommand));
+        }
+        else if (descriptor.ExecutionCommand is not null)
+        {
+            throw new InvalidDataException(
+                "Binary descriptors cannot include an execution command.");
+        }
+
+        var metadataBytes = metadata.Sum(item =>
+            Encoding.UTF8.GetByteCount(item.Key) +
+            Encoding.UTF8.GetByteCount(item.Value));
+        if (metadataBytes > MaximumBlobMetadataBytes)
+        {
+            throw new InvalidDataException(
+                "Cluster package Blob metadata exceeds the 8,192-byte limit.");
+        }
+        return metadata;
     }
 }
 
@@ -98,7 +300,8 @@ public sealed record ClusterPackagePublication(
     DateTimeOffset PublishedUtc,
     DateTimeOffset SasExpiresUtc,
     int PayloadFileCount,
-    string PayloadFingerprint);
+    string PayloadFingerprint,
+    ClusterPackageUpdateDescriptor UpdateDescriptor);
 
 public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
 {
@@ -116,7 +319,8 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
     public async Task<ClusterPackagePublication> PublishAsync(
         SyncSettings settings,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool forceBinaryUpdate = false)
     {
         ArgumentNullException.ThrowIfNull(settings);
         AzCopyService.Validate(settings);
@@ -128,7 +332,17 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
 
         var packageContainer = ClusterPackage.GetPackageContainerName(settings.Container);
         var resultsContainer = ClusterPackage.GetResultsContainerName(settings.Container);
-        var resultBlobPrefix = ClusterPackage.GetResultBlobPrefix(settings.LocalFolder);
+        var taskConfiguration = ClusterPackage.GetTaskConfiguration(settings.LocalFolder);
+        if (forceBinaryUpdate &&
+            taskConfiguration.ChangeType == ClusterPackageChangeType.CommandsOnly)
+        {
+            taskConfiguration = taskConfiguration with
+            {
+                ChangeType = ClusterPackageChangeType.Binary,
+                ExecutionArguments = []
+            };
+        }
+        var resultBlobPrefix = taskConfiguration.ResultPrefix;
         var resultBlobPath =
             $"{ClusterPackage.ResultsPrefix}{resultBlobPrefix}-" +
             $"{now.UtcDateTime:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}.zip";
@@ -254,17 +468,29 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
                     $"The compressed cluster package exceeds the " +
                     $"{ClusterPackage.MaximumArchiveBytes}-byte client limit.");
             }
+            var updateDescriptor = ClusterPackage.CreateUpdateDescriptor(
+                archivePath,
+                now,
+                taskConfiguration,
+                sasUri,
+                resultsBlobUri,
+                sasExpiresUtc);
             var uploadResult = await runner.RunAsync(
                 AzCopyLocator.Find(settings.AzCopyPath),
-                AzCopyArguments.Copy(archivePath, blobUri.AbsoluteUri),
+                AzCopyArguments.Copy(
+                    archivePath,
+                    blobUri.AbsoluteUri,
+                    ClusterPackage.GetUpdateDescriptorMetadata(updateDescriptor)),
                 cancellationToken,
+                AzCopyProcessMode.SensitiveCaptured,
                 environmentVariables: AzCopyAuthentication.GetEnvironment(settings));
             EnsureSuccess("AzCopy could not publish cluster_package.zip.", uploadResult);
             return new ClusterPackagePublication(
                 now.ToUniversalTime(),
                 sasExpiresUtc,
                 payload.Count,
-                payload.Fingerprint);
+                payload.Fingerprint,
+                updateDescriptor);
         }
         finally
         {
