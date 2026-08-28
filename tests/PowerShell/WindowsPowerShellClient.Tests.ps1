@@ -141,6 +141,15 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             $delegationSas
 
         Assert-ClusterPackageUri -Value $valid | Should -Be $valid
+        $plural =
+            'https://account123.blob.core.windows.net/sync-packages/cluster_package.zip' +
+            $delegationSas
+        Assert-ClusterPackageUri -Value $plural | Should -Be $plural
+        $pluralResults =
+            'https://account123.blob.core.windows.net/sync/cluster-results/plural.zip' +
+            $delegationSas.Replace('sp=r', 'sp=c')
+        Assert-ClusterResultsUri -Value $pluralResults -PackageUri $plural |
+            Should -Be $pluralResults
         {
             Assert-ClusterPackageUri -Value (
                 'https://account123.blob.core.windows.net/sync-package/other.zip' +
@@ -359,7 +368,6 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             IntervalSeconds = 17
             TaskExecutionRoot = 'C:\SyncSAW\work'
             TaskExecutionPath = 'K:\Tasks'
-            SpdiPath = 'K:\PDITestData\spdi'
             OutputPath = 'K:\Results'
         }
         $original | ConvertTo-Json |
@@ -379,7 +387,6 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         $saved.IntervalSeconds | Should -Be 17
         $saved.TaskExecutionRoot | Should -Be 'C:\SyncSAW\work'
         $saved.TaskExecutionPath | Should -Be 'K:\Tasks'
-        $saved.SpdiPath | Should -Be 'K:\PDITestData\spdi'
         $saved.OutputPath | Should -Be 'K:\Results'
         @(Get-ChildItem -LiteralPath $TestDrive -Include '*.tmp', '*.bak').Count |
             Should -Be 0
@@ -501,13 +508,16 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         $script:ClusterPackageBlobName = 'cluster_package.zip'
         $script:ClusterPackageConfigName = 'cluster_package.config'
         $script:ClusterPackageTaskName = 'task.ps1'
+        $script:ClusterPackageTaskConfigName = 'task.config.json'
         $root = New-Item -ItemType Directory -Path (Join-Path $TestDrive 'saw-root')
         Set-Content -LiteralPath (Join-Path $root 'task.ps1') -Value 'package only'
+        Set-Content -LiteralPath (Join-Path $root 'task.config.json') -Value '{}'
         Set-Content -LiteralPath (Join-Path $root 'keep.txt') -Value 'sync me'
 
         $records = Get-LocalFileRecords -Root $root
 
         @($records).RelativePath | Should -Be @('keep.txt')
         Test-SawInternalBlob -BlobPath 'task.ps1' | Should -BeTrue
+        Test-SawInternalBlob -BlobPath 'task.config.json' | Should -BeTrue
     }
 }

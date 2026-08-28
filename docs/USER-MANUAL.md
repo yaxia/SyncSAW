@@ -271,8 +271,8 @@ read-only SAS; the GUI then reports **Synced to SAW: Not yet**.
   `.syncsaw/saw-flags/` record files whose local size and exact timestamp match
   the source Blob.
 - **Excluded paths:** `.syncsaw/saw-flags/`, `.syncsaw/deletions/`,
-  `cluster_package.zip`, `cluster_package.config`, and root `task.ps1` are
-  excluded from normal synchronization.
+  `cluster_package.zip`, `cluster_package.config`, root `task.ps1`, and root
+  `task.config.json` are excluded from normal synchronization.
 - Folder structure is preserved. Manual upload keeps a path relative to the
   selected local root; files outside that root upload at the container root.
 

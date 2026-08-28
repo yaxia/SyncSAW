@@ -20,7 +20,8 @@ public sealed class AzCopyArgumentsTests
         Assert.Equal(ContainerUri.AbsoluteUri, arguments[2]);
         Assert.Contains("--delete-destination=false", arguments);
         Assert.Contains(
-            "--exclude-path=.syncsaw;cluster_package.zip;cluster_package.config;task.ps1",
+            "--exclude-path=.syncsaw;cluster_package.zip;cluster_package.config;" +
+            "task.ps1;task.config.json",
             arguments);
         Assert.DoesNotContain(arguments, argument => argument.Contains('"'));
     }

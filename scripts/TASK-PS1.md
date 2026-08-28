@@ -32,6 +32,13 @@ exception. The URL is a rotating seven-day, HTTPS-only, Blob-scoped user delegat
 with only create permission (`sp=c`, `sr=b`) for one exact result archive. It
 cannot create another Blob, list, read, overwrite, or delete data.
 
+Workload-specific settings such as input data paths belong in package-local
+`task.config.json`, not in the external workflow `bootstrap.config.json`.
+General settings shared by every task, including `TaskExecutionPath` and
+`OutputPath`, remain in `bootstrap.config.json` and survive SAS rollover. Root
+`task.config.json` is package-only like `task.ps1`: normal synchronization
+excludes it, while the cluster package publisher includes it.
+
 By default, that exact Blob is under `cluster-results/` in the container already
 monitored by the desktop app and `Sync-SAW.ps1`. Both clients therefore download
 the result archive into their local sync folders for fast automated analysis.

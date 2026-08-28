@@ -27,10 +27,38 @@ public sealed class ClusterPackagePublisherTests
     }
 
     [Fact]
+    public async Task GetResultBlobPrefix_ReadsAndValidatesTaskConfiguration()
+    {
+        var directory = Directory.CreateTempSubdirectory("SyncSAW.ResultPrefix.");
+        try
+        {
+            Assert.Equal(
+                ClusterPackage.DefaultResultBlobPrefix,
+                ClusterPackage.GetResultBlobPrefix(directory.FullName));
+            await File.WriteAllTextAsync(
+                Path.Combine(directory.FullName, ClusterPackage.TaskConfigurationName),
+                """{"ResultPrefix":"RocksDB-SPDIPerf"}""");
+            Assert.Equal(
+                "RocksDB-SPDIPerf",
+                ClusterPackage.GetResultBlobPrefix(directory.FullName));
+            await File.WriteAllTextAsync(
+                Path.Combine(directory.FullName, ClusterPackage.TaskConfigurationName),
+                """{"ResultPrefix":"bad prefix"}""");
+            Assert.Throws<InvalidDataException>(
+                () => ClusterPackage.GetResultBlobPrefix(directory.FullName));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public void TaskScript_IsExcludedOnlyFromNormalSync()
     {
         Assert.True(ClusterPackage.IsNormalSyncExcludedPath("task.ps1"));
         Assert.True(ClusterPackage.IsNormalSyncExcludedPath(@"\TASK.PS1"));
+        Assert.True(ClusterPackage.IsNormalSyncExcludedPath("task.config.json"));
         Assert.False(ClusterPackage.IsReservedPath("task.ps1"));
         Assert.False(ClusterPackage.IsNormalSyncExcludedPath("tools/task.ps1"));
     }
@@ -88,6 +116,9 @@ public sealed class ClusterPackagePublisherTests
             await File.WriteAllTextAsync(
                 Path.Combine(source.FullName, ClusterPackage.TaskScriptName),
                 "exit 0");
+            await File.WriteAllTextAsync(
+                Path.Combine(source.FullName, ClusterPackage.TaskConfigurationName),
+                "{}");
             Directory.CreateDirectory(Path.Combine(source.FullName, "data"));
             await File.WriteAllTextAsync(
                 Path.Combine(source.FullName, "data", "payload.txt"),
@@ -133,7 +164,7 @@ public sealed class ClusterPackagePublisherTests
 
             var result = await publisher.PublishAsync(settings, now, CancellationToken.None);
 
-            Assert.Equal(2, result.PayloadFileCount);
+            Assert.Equal(3, result.PayloadFileCount);
             Assert.Equal(expectedExpiry, result.SasExpiresUtc);
             Assert.Equal(
                 ["storage", "container", "create"],
@@ -184,6 +215,7 @@ public sealed class ClusterPackagePublisherTests
             using var archive = ZipFile.OpenRead(capturedArchive);
             var names = archive.Entries.Select(entry => entry.FullName).ToArray();
             Assert.Contains(ClusterPackage.TaskScriptName, names);
+            Assert.Contains(ClusterPackage.TaskConfigurationName, names);
             Assert.Contains("data/payload.txt", names);
             Assert.Contains(ClusterPackage.ConfigurationEntryName, names);
             Assert.DoesNotContain(".syncsaw/private.txt", names);

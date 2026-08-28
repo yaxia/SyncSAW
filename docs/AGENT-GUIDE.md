@@ -107,9 +107,9 @@ disabled and refuses to publish if the container is public. It builds
 `cluster_package.config` and uploads the package with the signed-in desktop
 user's Entra credential.
 
-Root `task.ps1` is package-only. Normal desktop and SAW synchronization exclude
-it, and manual desktop upload rejects the root path. A nested file such as
-`tools/task.ps1` remains ordinary sync data.
+Root `task.ps1` and `task.config.json` are package-only. Normal desktop and SAW
+synchronization exclude them, and manual desktop upload rejects their root
+paths. Nested files such as `tools/task.ps1` remain ordinary sync data.
 
 ### Required protocol answers
 
@@ -160,7 +160,9 @@ commit them or transfer them over an untrusted channel.
   "PackageUri": "https://contosodata.blob.core.windows.net/releases-package/cluster_package.zip?sp=r&...",
   "ResultsBlobUri": "https://contosodata.blob.core.windows.net/releases/cluster-results/initial.zip?sp=c&...",
   "IntervalSeconds": 10,
-  "TaskExecutionRoot": ""
+  "TaskExecutionRoot": "",
+  "TaskExecutionPath": "K:\\Tasks",
+  "OutputPath": "K:\\Results"
 }
 ```
 
@@ -221,9 +223,11 @@ The selected sync container name must be 55 characters or fewer so the
 
 ## Iteration procedure
 
-1. Put `task.ps1`, required executables, test inputs, and supporting files in
-   the selected desktop sync folder. Compress executable output into one
-   package file where practical. Do not put secrets in the payload.
+1. Put `task.ps1`, task-specific `task.config.json`, required executables, test
+   inputs, and supporting files in the selected desktop sync folder. Compress
+   executable output into one package file where practical. Do not put secrets
+   in the payload. Keep general `TaskExecutionPath` and `OutputPath` settings in
+   external `bootstrap.config.json`.
 2. Let the desktop synchronize changes and publish the package to the private
    package container. Do not restart or manipulate the desktop process.
 3. Wait for a new ZIP under the local `cluster-results` folder.

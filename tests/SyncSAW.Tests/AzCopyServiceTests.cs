@@ -275,7 +275,7 @@ public sealed class AzCopyServiceTests
 
             Assert.Equal(["list", "sync"], runner.Commands);
             Assert.Contains("--exclude-path=.syncsaw;cluster_package.zip;" +
-                "cluster_package.config;task.ps1", runner.Arguments[1]);
+                "cluster_package.config;task.ps1;task.config.json", runner.Arguments[1]);
         }
         finally
         {

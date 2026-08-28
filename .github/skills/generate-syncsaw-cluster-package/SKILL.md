@@ -24,6 +24,9 @@ Read this contract before generating, modifying, packaging, or deploying
    poller executes only that filename. Normal desktop and PowerShell
    synchronization exclude root `task.ps1`; only the cluster package publisher
    includes it.
+   Put workload-only settings in root `task.config.json`; it follows the same
+   package-only synchronization rule. Keep general `TaskExecutionPath` and
+   `OutputPath` settings in external `bootstrap.config.json`.
 4. The package contains generated schema-5 `cluster_package.config`. After a
    successful download, the poller reads its refreshed `PackageUri` and
    atomically saves it to the external `bootstrap.config.json` before starting

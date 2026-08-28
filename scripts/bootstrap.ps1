@@ -170,13 +170,14 @@ function Assert-ClusterPackageEndpoint {
         ) -or
         $uri.Host.Split('.')[0] -notmatch '^[a-z0-9]{3,24}$' -or
         $segments.Count -ne 2 -or
-        -not $segments[0].EndsWith('-package', [StringComparison]::Ordinal) -or
+        (-not $segments[0].EndsWith('-package', [StringComparison]::Ordinal) -and
+            -not $segments[0].EndsWith('-packages', [StringComparison]::Ordinal)) -or
         $segments[1] -cne $script:PackageBlobName -or
         -not [string]::IsNullOrEmpty($uri.Fragment) -or
         -not [string]::IsNullOrEmpty($uri.UserInfo) -or
         -not $uri.IsDefaultPort) {
         throw [System.ArgumentException]::new(
-            "PackageUri must match the HTTPS Blob protocol '<sync-container>-package/$($script:PackageBlobName)'."
+            "PackageUri must match the HTTPS Blob protocol '<sync-container>-package(s)/$($script:PackageBlobName)'."
         )
     }
     return $uri.AbsoluteUri
@@ -273,9 +274,18 @@ function Assert-ClusterResultsUri {
 
     $package = [uri]$PackageUri
     $packageSegments = @($package.AbsolutePath.Trim('/').Split('/'))
+    $packageSuffix = if ($packageSegments[0].EndsWith(
+            '-packages',
+            [StringComparison]::Ordinal
+        )) {
+        '-packages'
+    }
+    else {
+        '-package'
+    }
     $expectedResultsContainer = $packageSegments[0].Substring(
         0,
-        $packageSegments[0].Length - '-package'.Length
+        $packageSegments[0].Length - $packageSuffix.Length
     )
     $segments = @($uri.AbsolutePath.Trim('/').Split('/'))
     if (-not $uri.Host.Equals(
@@ -329,7 +339,6 @@ function Resolve-SyncRunnerConfiguration {
         'ExpiresUtc',
         'TaskExecutionRoot',
         'TaskExecutionPath',
-        'SpdiPath',
         'OutputPath',
         'IntervalSeconds'
     )

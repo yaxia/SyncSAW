@@ -8,6 +8,7 @@ protocol. Use `docs\TROUBLESHOOTING.md` for non-destructive diagnostics.
 
 Root `task.ps1` is package-only. It must be delivered inside
 `cluster_package.zip`, never as a standalone Blob in the normal sync container.
+Root `task.config.json` follows the same package-only rule.
 
 ## Devbox restrictions
 

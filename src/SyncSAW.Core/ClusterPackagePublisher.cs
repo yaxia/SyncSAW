@@ -10,6 +10,7 @@ public static class ClusterPackage
     public const string BlobName = "cluster_package.zip";
     public const string ConfigurationEntryName = "cluster_package.config";
     public const string TaskScriptName = "task.ps1";
+    public const string TaskConfigurationName = "task.config.json";
     public const int ConfigurationSchemaVersion = 5;
     public static readonly TimeSpan PublishInterval = TimeSpan.FromDays(1);
     public static readonly TimeSpan SasLifetime = TimeSpan.FromDays(7);
@@ -19,6 +20,7 @@ public static class ClusterPackage
     public const int MaximumPayloadFiles = 9_999;
     public const string PackageContainerSuffix = "-package";
     public const string ResultsPrefix = "cluster-results/";
+    public const string DefaultResultBlobPrefix = "result";
     private static readonly HashSet<string> ExcludedPayloadPaths =
         new(StringComparer.OrdinalIgnoreCase)
         {
@@ -37,7 +39,8 @@ public static class ClusterPackage
     {
         var normalized = (path ?? string.Empty).Trim().Trim('"').Replace('\\', '/').TrimStart('/');
         return IsReservedPath(normalized) ||
-               normalized.Equals(TaskScriptName, StringComparison.OrdinalIgnoreCase);
+               normalized.Equals(TaskScriptName, StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals(TaskConfigurationName, StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool IsExcludedPayloadPath(string path)
@@ -60,6 +63,35 @@ public static class ClusterPackage
 
     public static string GetResultsContainerName(string syncContainer) =>
         StorageEndpoint.NormalizeContainer(syncContainer);
+
+    public static string GetResultBlobPrefix(string sourceRoot)
+    {
+        var path = Path.Combine(Path.GetFullPath(sourceRoot), TaskConfigurationName);
+        if (!File.Exists(path))
+        {
+            return DefaultResultBlobPrefix;
+        }
+
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        if (!document.RootElement.TryGetProperty("ResultPrefix", out var property))
+        {
+            return DefaultResultBlobPrefix;
+        }
+
+        var prefix = property.GetString()?.Trim();
+        if (string.IsNullOrWhiteSpace(prefix) ||
+            prefix.Length > 64 ||
+            !char.IsAsciiLetterOrDigit(prefix[0]) ||
+            !prefix.All(character =>
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '.' or '_' or '-'))
+        {
+            throw new InvalidDataException(
+                "task.config.json ResultPrefix must contain 1-64 letters, digits, periods, " +
+                "underscores, or hyphens.");
+        }
+        return prefix;
+    }
 }
 
 public sealed record ClusterPackagePublication(
@@ -96,8 +128,10 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
 
         var packageContainer = ClusterPackage.GetPackageContainerName(settings.Container);
         var resultsContainer = ClusterPackage.GetResultsContainerName(settings.Container);
+        var resultBlobPrefix = ClusterPackage.GetResultBlobPrefix(settings.LocalFolder);
         var resultBlobPath =
-            $"{ClusterPackage.ResultsPrefix}{now.UtcDateTime:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}.zip";
+            $"{ClusterPackage.ResultsPrefix}{resultBlobPrefix}-" +
+            $"{now.UtcDateTime:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}.zip";
         var blobUri = StorageEndpoint.BuildBlobUri(
             settings.StorageAccount,
             packageContainer,
