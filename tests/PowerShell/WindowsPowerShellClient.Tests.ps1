@@ -22,7 +22,8 @@ Describe 'Windows PowerShell 5.1 cluster package runner' {
         function New-TestUpdateDescriptorHeaders {
             param(
                 [string]$ChangeType = 'binary',
-                [string[]]$ExecutionCommand
+                [string[]]$ExecutionCommand,
+                [switch]$UseLegacyUncompressedConfiguration
             )
 
             $headers = [Net.WebHeaderCollection]::new()
@@ -38,10 +39,25 @@ Describe 'Windows PowerShell 5.1 cluster package runner' {
                 IssuedUtc = '2026-08-28T05:04:03Z'
                 ExpiresUtc = '2026-09-04T00:00:00Z'
             } | ConvertTo-Json -Compress
-            $headers['x-ms-meta-syncsaw_bootstrap_config'] =
-                [Convert]::ToBase64String(
-                    [Text.Encoding]::UTF8.GetBytes($bootstrapConfiguration)
+            $bootstrapBytes = [Text.Encoding]::UTF8.GetBytes($bootstrapConfiguration)
+            if (-not $UseLegacyUncompressedConfiguration) {
+                $output = [IO.MemoryStream]::new()
+                $gzip = [IO.Compression.GZipStream]::new(
+                    $output,
+                    [IO.Compression.CompressionMode]::Compress,
+                    $true
                 )
+                try {
+                    $gzip.Write($bootstrapBytes, 0, $bootstrapBytes.Length)
+                }
+                finally {
+                    $gzip.Dispose()
+                }
+                $bootstrapBytes = $output.ToArray()
+                $output.Dispose()
+            }
+            $headers['x-ms-meta-syncsaw_bootstrap_config'] =
+                [Convert]::ToBase64String($bootstrapBytes)
             if ($null -ne $ExecutionCommand) {
                 $headers['x-ms-meta-syncsaw_execution_command'] =
                     [Convert]::ToBase64String(
@@ -311,6 +327,15 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
             Should -Be $testPackageUri
         $binary.BootstrapConfiguration.ResultsBlobUri |
             Should -Be $testResultsUri
+
+        $legacyBinary = Get-ClusterPackageUpdateDescriptor `
+            -Headers (
+                New-TestUpdateDescriptorHeaders `
+                    -UseLegacyUncompressedConfiguration
+            ) `
+            -CurrentPackageUri $testPackageUri
+        $legacyBinary.BootstrapConfiguration.PackageUri |
+            Should -Be $testPackageUri
 
         $command = @(
             'powershell.exe',

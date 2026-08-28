@@ -30,6 +30,9 @@ complete SAS URL into an issue, chat, test fixture, or log.
 | Entra error `530033` | Device-based Conditional Access blocked the attempted flow. Use **Azure CLI / Windows broker** and inspect the correlation ID in Entra sign-in logs. |
 | Login spends a long time discovering directories | Set `TenantId` to scope `az login` to one tenant and set `SubscriptionId` to select the desired account context. |
 | Files remain pending | Select **Refresh**, inspect the planned action and row error, verify both system clocks, and inspect the desktop and AzCopy logs. |
+| Files disappear after collapsing a folder | This is expected. Select the folder chevron to expand it; collapsed descendants remain part of the folder's aggregate state and deletion snapshot. |
+| Sorting does not create one flat global order | This is expected. Sorting applies independently within each folder and always keeps folders before files. The active header shows `▲` or `▼`. |
+| Folder deletion leaves a newly uploaded Blob | Folder deletion operates on the exact file snapshot shown at confirmation time, not a live prefix. Refresh and explicitly delete the new file if appropriate. |
 | A periodic refresh is skipped | Another operation holds the shared gate. SyncSAW intentionally prevents overlap and retries on a later cycle. Confirmed deletion waits instead of being dropped. |
 | A second desktop process does not open | This is expected. SyncSAW permits one process per signed-in Windows user and foregrounds the existing window. |
 | A remote file opens but edits are not uploaded | **Open** uses a temporary downloaded copy. Save the edited file into the configured local sync folder or use manual upload. |
@@ -69,6 +72,7 @@ registered repositories, and installed module versions without making changes.
 | A changed package is not downloaded | First inspect the redacted descriptor change type. `commands-only` intentionally never downloads. For `binary`, check ETag, Last Modified, descriptor SHA-256, and whether the Blob remained unchanged through conditional download. |
 | Commands-only update is rejected | Establish or recover state with a binary update. Commands-only requires the prior package directory, its `task.ps1`, and a valid installed binary hash. |
 | Commands-only update uses old files or settings | This is by design: only validated metadata arguments are new. Mark the publication `binary` whenever any script, executable, library, input, or package-local config must change. |
+| Published package is missing expected files | If `<sync-folder>\.syncsaw\package-source` exists, only that directory is packaged. Put the complete payload and package-root `task.ps1` there, or remove the empty directory to use the legacy sync-folder-root layout. |
 | Update descriptor is rejected | Republish with desktop schema 6. Required metadata is descriptor version 1, exact ZIP SHA-256, UTC build time, `binary`/`commands-only` type, valid schema-6 bootstrap configuration, and a valid command for commands-only. Combined metadata is limited to 8,192 UTF-8 bytes. |
 | Polling is skipped | This is expected while `task.ps1` is active. Bootstrap does not poll, install, or start another task until it exits. |
 | Another bootstrap instance is reported | One runner already owns the mutex for that configuration. Do not start a duplicate. |

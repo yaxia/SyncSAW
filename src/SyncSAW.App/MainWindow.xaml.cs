@@ -17,7 +17,7 @@ namespace SyncSAW.App;
 
 public partial class MainWindow : Window
 {
-    private readonly ObservableCollection<SyncItem> _items = [];
+    private readonly ObservableCollection<FileHierarchyEntry> _items = [];
     private readonly SettingsStore _settingsStore = new();
     private readonly OperationLog _operationLog;
     private readonly AzCopyProcessRunner _processRunner;
@@ -28,6 +28,12 @@ public partial class MainWindow : Window
     private readonly Icon _applicationIcon;
     private readonly Forms.NotifyIcon _trayIcon;
     private readonly HashSet<string> _remotePaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _expandedFolderPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _knownFolderPaths = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<SyncItem> _sourceItems = [];
+    private FileHierarchySortField _fileSortField = FileHierarchySortField.Name;
+    private FileHierarchySortDirection _fileSortDirection =
+        FileHierarchySortDirection.Ascending;
     private CancellationTokenSource? _currentOperationCts;
     private AppTheme _currentTheme = AppTheme.System;
     private bool _initialized;
@@ -52,6 +58,7 @@ public partial class MainWindow : Window
         OperationLogLocationTextBlock.Text =
             $"Operation logs: {OperationLog.DefaultDirectory}";
         FilesDataGrid.ItemsSource = _items;
+        UpdateFileSortHeaders();
         UpdateFileActionButtons();
         LoginModeComboBox.SelectedIndex = 0;
         ThemeComboBox.SelectedIndex = 0;
@@ -317,41 +324,64 @@ public partial class MainWindow : Window
 
     private async void DeleteRemote_Click(object sender, RoutedEventArgs e)
     {
-        var items = GetSelectedRemoteItems();
-        if (items.Count == 0)
+        var selectedEntries = GetSelectedFileEntries();
+        var paths = FileHierarchy.GetDeletionPaths(selectedEntries, _remotePaths);
+        if (paths.Count == 0)
         {
-            ShowRemoteSelectionRequired(singleSelection: false);
+            MessageBox.Show(
+                this,
+                "Select one or more Azure files, or select a folder to delete its current snapshot of files.",
+                "File or folder required",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
             return;
         }
 
         var settings = CaptureSettings();
-        var paths = items
-            .Select(item => item.Path)
+        var initialRemotePaths = paths
+            .Where(_remotePaths.Contains)
+            .ToArray();
+        var folderPaths = selectedEntries
+            .Where(entry => entry.IsFolder)
+            .Select(entry => entry.Path)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var localFiles = GetExistingLocalFiles(settings.LocalFolder, paths);
+        var initialLocalFiles = GetExistingLocalFiles(settings.LocalFolder, paths);
         var preview = string.Join(
             Environment.NewLine,
             paths.Take(5).Select(path => $"• {path}"));
-        if (paths.Length > 5)
+        if (paths.Count > 5)
         {
-            preview += $"{Environment.NewLine}• …and {paths.Length - 5:N0} more";
+            preview += $"{Environment.NewLine}• …and {paths.Count - 5:N0} more";
         }
-        var localImpact = localFiles.Count == 0
+        var localImpact =
+            $"{initialLocalFiles.Count:N0} matching local " +
+            (initialLocalFiles.Count == 1 ? "file" : "files") +
+            " and any resulting empty selected folders will be deleted.";
+        var remoteImpact =
+            $"{initialRemotePaths.Length:N0} Azure " +
+            (initialRemotePaths.Length == 1 ? "Blob" : "Blobs") +
+            " will be deleted.";
+        var sawImpact = initialRemotePaths.Length == 0
             ? string.Empty
             : $"{Environment.NewLine}{Environment.NewLine}" +
-              $"{localFiles.Count:N0} matching local " +
-              (localFiles.Count == 1 ? "file will" : "files will") +
-              " also be deleted to prevent automatic re-upload.";
-        var sawImpact = $"{Environment.NewLine}{Environment.NewLine}" +
-                        "Any matching copy on SAW will be deleted on its next synchronization check.";
+              "Any matching copy on SAW will be deleted on its next synchronization check.";
+        var singleFolder = selectedEntries.Count == 1 && selectedEntries[0].IsFolder;
         if (!ConfirmationDialog.Show(
                 this,
-                paths.Length == 1 ? "Delete selected file?" : $"Delete {paths.Length:N0} selected files?",
-                $"This immediately and permanently deletes the selected Blob" +
-                (paths.Length == 1 ? string.Empty : "s") +
-                $" from Azure Storage.{localImpact}{sawImpact}{Environment.NewLine}{Environment.NewLine}{preview}",
-                paths.Length == 1 ? "Delete file" : $"Delete {paths.Length:N0} files"))
+                singleFolder
+                    ? $"Delete folder '{selectedEntries[0].Path}'?"
+                    : paths.Count == 1
+                        ? "Delete selected file?"
+                        : $"Delete {paths.Count:N0} selected files?",
+                $"This immediately and permanently deletes every listed file in the selected snapshot." +
+                $"{Environment.NewLine}{Environment.NewLine}{remoteImpact} {localImpact}" +
+                $"{sawImpact}{Environment.NewLine}{Environment.NewLine}{preview}",
+                singleFolder
+                    ? "Delete folder"
+                    : paths.Count == 1
+                        ? "Delete file"
+                        : $"Delete {paths.Count:N0} files"))
         {
             return;
         }
@@ -361,22 +391,32 @@ public partial class MainWindow : Window
         try
         {
             await RunExclusiveAsync(
-                $"Deleting {paths.Length:N0} selected " +
-                (paths.Length == 1 ? "file" : "files") + "...",
+                $"Deleting {paths.Count:N0} selected " +
+                (paths.Count == 1 ? "file" : "files") + "...",
                 async (current, token) =>
                 {
+                    var localFiles = GetExistingLocalFiles(current.LocalFolder, paths);
+                    var remotePaths = paths
+                        .Where(_remotePaths.Contains)
+                        .ToArray();
                     DeleteLocalFiles(localFiles);
-                    await _azCopy.DeleteRemoteBatchAsync(current, paths, token);
+                    if (remotePaths.Length > 0)
+                    {
+                        await _azCopy.DeleteRemoteBatchAsync(current, remotePaths, token);
+                    }
+                    DeleteEmptyLocalFolders(current.LocalFolder, folderPaths);
 
                     await RefreshCoreAsync(current, token);
                     SetStatus(
-                        $"Deleted {paths.Length:N0} " +
-                        (paths.Length == 1 ? "file" : "files") +
-                        " from Azure immediately; SAW cleanup is queued for its next running cycle.");
+                        $"Deleted {paths.Count:N0} " +
+                        (paths.Count == 1 ? "file" : "files") +
+                        (remotePaths.Length == 0
+                            ? " locally."
+                            : "; Azure deletion is complete and SAW cleanup is queued."));
                 },
                 queueIfBusy: true,
-                queuedStatus: $"Deletion of {paths.Length:N0} selected " +
-                              (paths.Length == 1 ? "file" : "files") +
+                queuedStatus: $"Deletion of {paths.Count:N0} selected " +
+                              (paths.Count == 1 ? "file" : "files") +
                               " is queued behind the active synchronization.");
         }
         finally
@@ -716,10 +756,14 @@ public partial class MainWindow : Window
         UpdateConfigurationSummary();
     }
 
-    private bool TryGetSelectedRemote(out SyncItem item)
+    private bool TryGetSelectedRemote(out FileHierarchyEntry item)
     {
-        var items = GetSelectedRemoteItems();
-        item = items.Count == 1 ? items[0] : null!;
+        var entries = GetSelectedFileEntries();
+        item = entries.Count == 1 &&
+               !entries[0].IsFolder &&
+               _remotePaths.Contains(entries[0].Path)
+            ? entries[0]
+            : null!;
         if (item is not null)
         {
             return true;
@@ -729,10 +773,14 @@ public partial class MainWindow : Window
         return false;
     }
 
-    private IReadOnlyList<SyncItem> GetSelectedRemoteItems() =>
+    private IReadOnlyList<FileHierarchyEntry> GetSelectedRemoteItems() =>
+        GetSelectedFileEntries()
+            .Where(item => !item.IsFolder && _remotePaths.Contains(item.Path))
+            .ToArray();
+
+    private IReadOnlyList<FileHierarchyEntry> GetSelectedFileEntries() =>
         FilesDataGrid.SelectedItems
-            .OfType<SyncItem>()
-            .Where(item => _remotePaths.Contains(item.Path))
+            .OfType<FileHierarchyEntry>()
             .ToArray();
 
     private void ShowRemoteSelectionRequired(bool singleSelection)
@@ -757,31 +805,85 @@ public partial class MainWindow : Window
         }
     }
 
+    private void FilesDataGrid_Sorting(object sender, DataGridSortingEventArgs e)
+    {
+        if (!Enum.TryParse<FileHierarchySortField>(
+                e.Column.SortMemberPath,
+                ignoreCase: true,
+                out var field))
+        {
+            e.Handled = true;
+            return;
+        }
+
+        if (_fileSortField == field)
+        {
+            _fileSortDirection =
+                _fileSortDirection == FileHierarchySortDirection.Ascending
+                    ? FileHierarchySortDirection.Descending
+                    : FileHierarchySortDirection.Ascending;
+        }
+        else
+        {
+            _fileSortField = field;
+            _fileSortDirection = FileHierarchySortDirection.Ascending;
+        }
+
+        e.Handled = true;
+        UpdateFileSortHeaders();
+        RebuildFileHierarchyPreservingSelection();
+    }
+
     private void ReplaceFileItemsPreservingSelection(IReadOnlyList<SyncItem> items)
     {
-        var selectedPaths = FilesDataGrid.SelectedItems
-            .OfType<SyncItem>()
-            .Select(item => item.Path)
+        var selectedKeys = FilesDataGrid.SelectedItems
+            .OfType<FileHierarchyEntry>()
+            .Select(item => item.Key)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var folders = FileHierarchy.GetFolderPaths(items);
+        foreach (var folder in folders)
+        {
+            if (!_knownFolderPaths.Contains(folder))
+            {
+                _expandedFolderPaths.Add(folder);
+            }
+        }
+        _expandedFolderPaths.IntersectWith(folders);
+        _knownFolderPaths.Clear();
+        _knownFolderPaths.UnionWith(folders);
+        _sourceItems = items.ToArray();
+        RebuildFileHierarchyPreservingSelection(selectedKeys);
+    }
 
+    private void RebuildFileHierarchyPreservingSelection(
+        IReadOnlySet<string>? selectedKeys = null)
+    {
+        selectedKeys ??= FilesDataGrid.SelectedItems
+            .OfType<FileHierarchyEntry>()
+            .Select(item => item.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         _restoringFileSelection = true;
         try
         {
             FilesDataGrid.SelectedItems.Clear();
             _items.Clear();
-            foreach (var item in items)
+            foreach (var item in FileHierarchy.Build(
+                         _sourceItems,
+                         _expandedFolderPaths,
+                         _fileSortField,
+                         _fileSortDirection))
             {
                 _items.Add(item);
             }
 
-            if (selectedPaths.Count == 0)
+            if (selectedKeys.Count == 0)
             {
                 return;
             }
 
             foreach (var item in _items)
             {
-                if (selectedPaths.Contains(item.Path))
+                if (selectedKeys.Contains(item.Key))
                 {
                     FilesDataGrid.SelectedItems.Add(item);
                 }
@@ -793,11 +895,34 @@ public partial class MainWindow : Window
         }
     }
 
+    private void FolderExpander_PreviewMouseLeftButtonDown(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        if (sender is not TextBlock
+            {
+                DataContext: FileHierarchyEntry { IsFolder: true } folder
+            })
+        {
+            return;
+        }
+
+        if (!_expandedFolderPaths.Remove(folder.Path))
+        {
+            _expandedFolderPaths.Add(folder.Path);
+        }
+        RebuildFileHierarchyPreservingSelection();
+        e.Handled = true;
+    }
+
     private void FileSelectionCheckBox_PreviewMouseLeftButtonDown(
         object sender,
         MouseButtonEventArgs e)
     {
-        if (sender is not System.Windows.Controls.CheckBox { DataContext: SyncItem item })
+        if (sender is not System.Windows.Controls.CheckBox
+            {
+                DataContext: FileHierarchyEntry item
+            })
         {
             return;
         }
@@ -821,16 +946,58 @@ public partial class MainWindow : Window
             return;
         }
 
+        var selectedEntries = GetSelectedFileEntries();
         var remoteCount = GetSelectedRemoteItems().Count;
-        DownloadRemoteButton.IsEnabled = remoteCount == 1;
-        OpenRemoteButton.IsEnabled = remoteCount == 1;
-        DeleteRemoteButton.IsEnabled = remoteCount > 0 && !_deletionQueuedOrRunning;
+        var deletionCount = FileHierarchy.GetDeletionPaths(selectedEntries, _remotePaths).Count;
+        var selectedFolderCount = selectedEntries.Count(entry => entry.IsFolder);
+        DownloadRemoteButton.IsEnabled =
+            selectedEntries.Count == 1 && remoteCount == 1;
+        OpenRemoteButton.IsEnabled =
+            selectedEntries.Count == 1 && remoteCount == 1;
+        DeleteRemoteButton.IsEnabled = deletionCount > 0 && !_deletionQueuedOrRunning;
         DeleteRemoteButton.ToolTip = _deletionQueuedOrRunning
             ? "A deletion is queued or running."
-            : "Delete the selected Azure files and queue matching SAW cleanup.";
-        DeleteRemoteButton.Content = remoteCount > 1
-            ? $"Delete selected ({remoteCount:N0})"
+            : "Delete selected files or all files in selected folders; remote files also queue SAW cleanup.";
+        DeleteRemoteButton.Content = selectedFolderCount > 0
+            ? selectedFolderCount == 1
+                ? "Delete folder"
+                : $"Delete folders ({selectedFolderCount:N0})"
+            : deletionCount > 1
+                ? $"Delete selected ({deletionCount:N0})"
             : "Delete selected";
+    }
+
+    private void UpdateFileSortHeaders()
+    {
+        foreach (var column in FilesDataGrid.Columns.Where(
+                     column => column.CanUserSort &&
+                               !string.IsNullOrWhiteSpace(column.SortMemberPath)))
+        {
+            if (!Enum.TryParse<FileHierarchySortField>(
+                    column.SortMemberPath,
+                    ignoreCase: true,
+                    out var field))
+            {
+                continue;
+            }
+            var label = field switch
+            {
+                FileHierarchySortField.Name => "Name",
+                FileHierarchySortField.State => "State",
+                FileHierarchySortField.LastModified => "Last modified (local)",
+                FileHierarchySortField.Size => "Size",
+                FileHierarchySortField.Action => "Action",
+                FileHierarchySortField.SyncedToSaw => "Synced to SAW",
+                FileHierarchySortField.Error => "Error",
+                _ => column.SortMemberPath
+            };
+            var icon = field == _fileSortField
+                ? _fileSortDirection == FileHierarchySortDirection.Ascending
+                    ? "▲"
+                    : "▼"
+                : "↕";
+            column.Header = $"{label} {icon}";
+        }
     }
 
     private static IReadOnlyList<string> GetExistingLocalFiles(
@@ -901,6 +1068,46 @@ public partial class MainWindow : Window
                 "No Azure Blobs were deleted because one or more matching local files " +
                 "could not be removed.",
                 new AggregateException(failures));
+        }
+    }
+
+    private static void DeleteEmptyLocalFolders(
+        string root,
+        IEnumerable<string> relativeFolderPaths)
+    {
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        var fullRoot = Path.GetFullPath(root);
+        var rootPrefix = fullRoot.TrimEnd(Path.DirectorySeparatorChar) +
+                         Path.DirectorySeparatorChar;
+        foreach (var relativePath in relativeFolderPaths)
+        {
+            var candidate = Path.GetFullPath(Path.Combine(
+                fullRoot,
+                relativePath
+                    .TrimEnd('/')
+                    .Replace('/', Path.DirectorySeparatorChar)));
+            if (!candidate.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase) ||
+                !Directory.Exists(candidate))
+            {
+                continue;
+            }
+
+            var directories = Directory
+                .EnumerateDirectories(candidate, "*", SearchOption.AllDirectories)
+                .Append(candidate)
+                .OrderByDescending(path => path.Length)
+                .ToArray();
+            foreach (var directory in directories)
+            {
+                if (!Directory.EnumerateFileSystemEntries(directory).Any())
+                {
+                    Directory.Delete(directory, recursive: false);
+                }
+            }
         }
     }
 
@@ -986,17 +1193,16 @@ public partial class MainWindow : Window
             return;
         }
 
-        for (var index = 0; index < _items.Count; index++)
-        {
-            if (_items[index].State == SyncItemState.Pending)
-            {
-                _items[index] = _items[index] with
+        _sourceItems = _sourceItems
+            .Select(item => item.State == SyncItemState.Pending
+                ? item with
                 {
                     State = SyncItemState.Error,
                     Error = message
-                };
-            }
-        }
+                }
+                : item)
+            .ToArray();
+        RebuildFileHierarchyPreservingSelection();
     }
 
     private Task SetBusyAsync(string activity) => Dispatcher.InvokeAsync(() =>

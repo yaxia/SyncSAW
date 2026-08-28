@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace SyncSAW.Core;
@@ -57,6 +58,8 @@ public static class ClusterPackage
     public const string PackageContainerSuffix = "-package";
     public const string ResultsPrefix = "cluster-results/";
     public const string DefaultResultBlobPrefix = "result";
+    public static readonly string PackageSourceRelativePath =
+        Path.Combine(".syncsaw", "package-source");
     private static readonly HashSet<string> ExcludedPayloadPaths =
         new(StringComparer.OrdinalIgnoreCase)
         {
@@ -99,6 +102,13 @@ public static class ClusterPackage
 
     public static string GetResultsContainerName(string syncContainer) =>
         StorageEndpoint.NormalizeContainer(syncContainer);
+
+    public static string GetPayloadSourceRoot(string syncRoot)
+    {
+        var root = Path.GetFullPath(syncRoot);
+        var packageSource = Path.Combine(root, PackageSourceRelativePath);
+        return Directory.Exists(packageSource) ? packageSource : root;
+    }
 
     public static ClusterPackageTaskConfiguration GetTaskConfiguration(string sourceRoot)
     {
@@ -259,8 +269,8 @@ public static class ClusterPackage
             [DescriptorVersionMetadataKey] = UpdateDescriptorVersion.ToString(),
             [PackageSha256MetadataKey] = descriptor.PackageSha256,
             [PackageBuiltUtcMetadataKey] = descriptor.PackageBuiltUtc.ToString("O"),
-            [BootstrapConfigurationMetadataKey] = Convert.ToBase64String(
-                JsonSerializer.SerializeToUtf8Bytes(descriptor.BootstrapConfiguration)),
+            [BootstrapConfigurationMetadataKey] =
+                EncodeCompressedJsonMetadata(descriptor.BootstrapConfiguration),
             [ChangeTypeMetadataKey] = descriptor.ChangeType switch
             {
                 ClusterPackageChangeType.Binary => "binary",
@@ -294,6 +304,22 @@ public static class ClusterPackage
         }
         return metadata;
     }
+
+    private static string EncodeCompressedJsonMetadata<T>(T value)
+    {
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(output, CompressionLevel.SmallestSize, leaveOpen: true))
+        {
+            JsonSerializer.Serialize(
+                gzip,
+                value,
+                new JsonSerializerOptions
+                {
+                    Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                });
+        }
+        return Convert.ToBase64String(output.ToArray());
+    }
 }
 
 public sealed record ClusterPackagePublication(
@@ -309,7 +335,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
         string sourceRoot,
         CancellationToken cancellationToken = default)
     {
-        var root = Path.GetFullPath(sourceRoot);
+        var root = ClusterPackage.GetPayloadSourceRoot(sourceRoot);
         return ComputePayloadFingerprint(
             EnumeratePayloadFiles(root)
                 .OrderBy(item => item.RelativePath, StringComparer.OrdinalIgnoreCase),
@@ -332,7 +358,8 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
 
         var packageContainer = ClusterPackage.GetPackageContainerName(settings.Container);
         var resultsContainer = ClusterPackage.GetResultsContainerName(settings.Container);
-        var taskConfiguration = ClusterPackage.GetTaskConfiguration(settings.LocalFolder);
+        var payloadSourceRoot = ClusterPackage.GetPayloadSourceRoot(settings.LocalFolder);
+        var taskConfiguration = ClusterPackage.GetTaskConfiguration(payloadSourceRoot);
         if (forceBinaryUpdate &&
             taskConfiguration.ChangeType == ClusterPackageChangeType.CommandsOnly)
         {
@@ -455,7 +482,7 @@ public sealed class ClusterPackagePublisher(IAzCopyRunner runner)
         try
         {
             var payload = await CreateArchiveAsync(
-                settings.LocalFolder,
+                payloadSourceRoot,
                 archivePath,
                 sasUri,
                 resultsBlobUri,

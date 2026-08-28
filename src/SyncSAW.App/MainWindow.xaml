@@ -16,6 +16,9 @@
     <Window.Resources>
         <local:SyncStateDisplayConverter x:Key="SyncStateDisplayConverter"/>
         <local:FileSizeConverter x:Key="FileSizeConverter"/>
+        <local:HierarchyIndentConverter x:Key="HierarchyIndentConverter"/>
+        <local:FileHierarchyIconConverter x:Key="FileHierarchyIconConverter"/>
+        <local:ExpansionIconConverter x:Key="ExpansionIconConverter"/>
 
         <Style x:Key="SummaryIconStyle" TargetType="Border">
             <Setter Property="Width" Value="40"/>
@@ -445,36 +448,78 @@
                               IsReadOnly="True"
                               SelectionMode="Extended"
                               SelectionChanged="FilesDataGrid_SelectionChanged"
+                              Sorting="FilesDataGrid_Sorting"
                               AlternationCount="2">
                         <DataGrid.Columns>
-                            <DataGridTemplateColumn Width="54" Header="Select">
+                            <DataGridTemplateColumn Width="54"
+                                                   CanUserSort="False"
+                                                   Header="Select">
                                <DataGridTemplateColumn.CellTemplate>
                                    <DataTemplate>
                                        <CheckBox HorizontalAlignment="Center"
                                                  VerticalAlignment="Center"
                                                  IsChecked="{Binding RelativeSource={RelativeSource AncestorType=DataGridRow}, Path=IsSelected, Mode=OneWay}"
                                                  PreviewMouseLeftButtonDown="FileSelectionCheckBox_PreviewMouseLeftButtonDown"
-                                                 ToolTip="Add or remove this file from the batch selection"/>
+                                                 ToolTip="Add or remove this file or folder from the batch selection"/>
                                    </DataTemplate>
                                </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTemplateColumn Width="2.2*" MinWidth="190" Header="Name">
+                            <DataGridTemplateColumn x:Name="NameColumn"
+                                                    Width="2.2*"
+                                                    MinWidth="190"
+                                                    Header="Name ↑"
+                                                    SortMemberPath="Name">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <StackPanel Margin="{Binding Depth, Converter={StaticResource HierarchyIndentConverter}}"
+                                                    Orientation="Horizontal"
+                                                    VerticalAlignment="Center">
+                                            <TextBlock Width="18"
+                                                       VerticalAlignment="Center"
+                                                       Cursor="Hand"
+                                                       FontFamily="Segoe Fluent Icons, Segoe UI Symbol"
+                                                       FontSize="11"
+                                                       PreviewMouseLeftButtonDown="FolderExpander_PreviewMouseLeftButtonDown"
+                                                       Text="{Binding IsExpanded, Converter={StaticResource ExpansionIconConverter}}"
+                                                       ToolTip="Expand or collapse folder">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Visibility" Value="Hidden"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsFolder}" Value="True">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
                                             <TextBlock Margin="0,0,9,0"
                                                        FontFamily="Segoe Fluent Icons, Segoe UI Symbol"
                                                        FontSize="15"
                                                        Foreground="{DynamicResource InfoBrush}"
-                                                       Text="&#xE7C3;"/>
+                                                       Text="{Binding IsFolder, Converter={StaticResource FileHierarchyIconConverter}}"/>
                                             <TextBlock VerticalAlignment="Center"
-                                                       FontWeight="SemiBold"
-                                                       Text="{Binding Path}"/>
+                                                       Text="{Binding Name}"
+                                                       ToolTip="{Binding Path}">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="FontWeight" Value="Normal"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsFolder}" Value="True">
+                                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTemplateColumn Width="125" Header="State">
+                            <DataGridTemplateColumn x:Name="StateColumn"
+                                                    Width="125"
+                                                    Header="State ↕"
+                                                    SortMemberPath="State">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <Border Style="{StaticResource StatusBadgeBorderStyle}">
@@ -484,10 +529,15 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Width="185"
-                                                Header="Last modified (local)"
+                            <DataGridTextColumn x:Name="LastModifiedColumn"
+                                                Width="185"
+                                                Header="Last modified (local) ↕"
+                                                SortMemberPath="LastModified"
                                                 Binding="{Binding LocalLastModified, StringFormat={}{0:MMM d, yyyy h:mm tt}}"/>
-                            <DataGridTemplateColumn Width="100" Header="Size">
+                            <DataGridTemplateColumn x:Name="SizeColumn"
+                                                    Width="100"
+                                                    Header="Size ↕"
+                                                    SortMemberPath="Size">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <TextBlock Foreground="{DynamicResource MutedBrush}"
@@ -495,7 +545,10 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTemplateColumn Width="145" Header="Action">
+                            <DataGridTemplateColumn x:Name="ActionColumn"
+                                                    Width="145"
+                                                    Header="Action ↕"
+                                                    SortMemberPath="Action">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <TextBlock Foreground="{DynamicResource AccentBrush}"
@@ -504,7 +557,10 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTemplateColumn Width="110" Header="Synced to SAW">
+                            <DataGridTemplateColumn x:Name="SyncedToSawColumn"
+                                                    Width="110"
+                                                    Header="Synced to SAW ↕"
+                                                    SortMemberPath="SyncedToSaw">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <Border Style="{StaticResource SawBadgeBorderStyle}">
@@ -513,7 +569,12 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Width="1.4*" MinWidth="120" Header="Error" Binding="{Binding Error}"/>
+                            <DataGridTextColumn x:Name="ErrorColumn"
+                                                Width="1.4*"
+                                                MinWidth="120"
+                                                Header="Error ↕"
+                                                SortMemberPath="Error"
+                                                Binding="{Binding Error}"/>
                         </DataGrid.Columns>
                     </DataGrid>
 

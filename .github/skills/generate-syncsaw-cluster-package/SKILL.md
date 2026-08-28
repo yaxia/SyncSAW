@@ -4,7 +4,7 @@ description: Generate or update a SyncSAW identity-less cluster package, bootstr
 compatibility: Windows cluster targets using 64-bit Windows PowerShell 5.1; publishing requires the SyncSAW desktop app and Azure CLI authentication.
 metadata:
   author: SyncSAW
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Generate a SyncSAW cluster package
@@ -20,10 +20,13 @@ Read this contract before generating, modifying, packaging, or deploying
    `https://<account>.blob.core.windows.net/<sync-container>-package/cluster_package.zip`.
    `PackageUri` in the external config is the complete exact-Blob read-only user
    delegation SAS URL for that endpoint.
-3. Put the replaceable workload at the package root as `task.ps1`. The cluster
-   poller executes only that filename. Normal desktop and PowerShell
-   synchronization exclude root `task.ps1`; only the cluster package publisher
-   includes it.
+3. Put the replaceable workload under
+   `<sync-folder>\.syncsaw\package-source`, with `task.ps1` at that package
+   source root. When this directory exists, the publisher packages only its
+   contents. If it does not exist, the publisher retains the legacy behavior of
+   building from the sync-folder root. The cluster poller executes only
+   package-root `task.ps1`. The `.syncsaw` directory is excluded from normal
+   desktop and PowerShell synchronization.
    Put workload-only settings in root `task.config.json`; it follows the same
    package-only synchronization rule. Keep general `TaskExecutionPath` and
    `OutputPath` settings in external `bootstrap.config.json`.
@@ -57,7 +60,7 @@ Set these Blob metadata fields when publishing `cluster_package.zip`:
 | `syncsaw_package_built_utc` | UTC round-trip build timestamp |
 | `syncsaw_change_type` | `binary` or `commands-only` |
 | `syncsaw_execution_command` | Commands-only Base64 UTF-8 JSON string array; omit for binary |
-| `syncsaw_bootstrap_config` | Base64 UTF-8 schema-6 JSON with refreshed package-read and exact result-create SAS URLs plus issue/expiry times |
+| `syncsaw_bootstrap_config` | Base64 GZip-compressed UTF-8 schema-6 JSON with refreshed package-read and exact result-create SAS URLs plus issue/expiry times |
 
 The combined UTF-8 metadata names and values must not exceed 8,192 bytes.
 SyncSAW generates and atomically uploads these fields; do not hand-edit them.
@@ -89,8 +92,8 @@ Choose the update type in package-root `task.config.json`:
   `syncsaw_bootstrap_config`, atomically persists the refreshed SAS URLs, and
   gives the existing task a new one-use result upload target. For binary
   updates, the ZIP's `cluster_package.config` must match the metadata copy.
-- Base64 is not encryption. The metadata configuration contains bearer
-  credentials; never log, print, commit, or copy it to agent output.
+- GZip and Base64 are not encryption. The metadata configuration contains
+  bearer credentials; never log, print, commit, or copy it to agent output.
 
 The execution command has a fixed PowerShell 5.1 and `task.ps1` prefix. An agent
 may provide at most 32 additional strings, each at most 1,024 UTF-8 bytes,

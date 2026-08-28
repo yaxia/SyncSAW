@@ -110,12 +110,16 @@ https://<account>.blob.core.windows.net/<sync-container>-package/cluster_package
 ```
 
 The desktop creates the `<sync-container>-package` container with public access
-disabled and refuses to publish if the container is public. It builds
-`cluster_package.zip` from the selected local folder, excluding `.syncsaw`,
-`cluster-results`, reserved package/config names, and cluster-local
+disabled and refuses to publish if the container is public. Prefer placing the
+complete payload under `<sync-folder>\.syncsaw\package-source`, with
+`task.ps1` at that package source root. When this directory exists, the
+publisher packages only its contents. If it is absent, the publisher retains
+the legacy behavior of building from the selected local folder while excluding
+`.syncsaw`, `cluster-results`, reserved package/config names, and cluster-local
 `PDITest/PDI.zip` and `PDITest/spdi.zip` datasets. It adds schema-6
 `cluster_package.config` and uploads the package with the signed-in desktop
-user's Entra credential.
+user's Entra credential. The `.syncsaw` directory is excluded from normal
+desktop and SAW synchronization.
 
 Root `task.ps1` and `task.config.json` are package-only. Normal desktop and SAW
 synchronization exclude them, and manual desktop upload rejects their root
@@ -134,7 +138,7 @@ bytes.
 | `syncsaw_package_built_utc` | UTC round-trip timestamp for the package build |
 | `syncsaw_change_type` | `binary` or `commands-only` |
 | `syncsaw_execution_command` | Commands-only: Base64-encoded UTF-8 JSON string array; binary: absent |
-| `syncsaw_bootstrap_config` | Base64-encoded UTF-8 schema-6 JSON containing refreshed `PackageUri`, `ResultsBlobUri`, `IssuedUtc`, and `ExpiresUtc` |
+| `syncsaw_bootstrap_config` | Base64 GZip-compressed UTF-8 schema-6 JSON containing refreshed `PackageUri`, `ResultsBlobUri`, `IssuedUtc`, and `ExpiresUtc` |
 
 The command array cannot select an executable or script. Its fixed prefix is
 `powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File
@@ -145,10 +149,11 @@ quotes every argument for the native Windows command line, and never invokes a
 shell command string.
 
 The bootstrap configuration metadata carries bearer SAS URLs, so it is
-security-sensitive even though it is Base64 encoded. SyncSAW suppresses the
-AzCopy metadata argument from operation logs. Never print, copy, commit, or
-manually decode it into diagnostics. Bootstrap validates both SAS scopes and
-the fixed package endpoint before atomically updating its protected external
+security-sensitive even though it is compressed and Base64 encoded. SyncSAW
+suppresses the AzCopy metadata argument from operation logs. Never print, copy,
+commit, or manually decode it into diagnostics. Bootstrap accepts the prior
+uncompressed Base64 form for compatibility, validates both SAS scopes and the
+fixed package endpoint, and then atomically updates its protected external
 config. On binary updates, the embedded `cluster_package.config` must exactly
 match this metadata configuration.
 

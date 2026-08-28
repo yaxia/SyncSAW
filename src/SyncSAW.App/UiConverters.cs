@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Windows;
 using System.Windows.Data;
 using SyncSAW.Core;
 
@@ -14,10 +15,38 @@ internal sealed class SyncStateDisplayConverter : IValueConverter
                 SyncItemState.Pending => "Pending",
                 SyncItemState.LocalOnly => "Local only",
                 SyncItemState.RemoteOnly => "Remote only",
+                SyncItemState.Mixed => "Mixed",
                 SyncItemState.Error => "Error",
                 _ => state.ToString()
             }
             : string.Empty;
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}
+
+internal sealed class HierarchyIndentConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+        new Thickness(value is int depth ? depth * 18 : 0, 0, 0, 0);
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}
+
+internal sealed class FileHierarchyIconConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+        value is true ? "\uE8B7" : "\uE7C3";
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}
+
+internal sealed class ExpansionIconConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+        value is true ? "\uE70D" : "\uE76C";
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
         throw new NotSupportedException();

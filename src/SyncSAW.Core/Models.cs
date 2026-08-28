@@ -19,6 +19,7 @@ public enum SyncItemState
     Pending,
     LocalOnly,
     RemoteOnly,
+    Mixed,
     Error
 }
 

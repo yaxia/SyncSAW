@@ -121,13 +121,26 @@ The PowerShell SAW client does not use or require AzCopy.
    or clear the subscription to keep Azure CLI's interactive selection.
 5. Select **Sign in** and complete the Windows account prompt.
 6. Select **Refresh** to list remote Blobs and run AzCopy dry-run planning.
-7. Review each file's state, time, size, planned action, error, and
+7. Expand or collapse folders in the **Files** list. Folder rows summarize all
+   descendant files, including total size, newest modification time, state,
+   planned action, SAW status, and errors.
+8. Select any sortable column header. `▲` marks ascending order, `▼` marks
+   descending order, and `↕` marks a sortable column that is not active.
+   Sorting is applied among siblings and always keeps folders before files.
+9. Review each file's state, time, size, planned action, error, and
    **Synced to SAW** status.
-8. Use the synchronization toggle to pause or resume automatic transfers.
-9. To serve cluster machines, enable **Publish cluster package on changes and
+10. Use the synchronization toggle to pause or resume automatic transfers.
+11. To serve cluster machines, enable **Publish cluster package on changes and
    daily** under **Advanced settings**. This requires **Azure CLI / Windows
    broker** authentication. Follow the [agent guide](AGENT-GUIDE.md) for the
    package protocol.
+
+For an isolated cluster payload, create
+`<local-sync-folder>\.syncsaw\package-source` and put package-root
+`task.ps1`, `task.config.json`, executables, and inputs there. When that
+directory exists, only its contents are packaged; otherwise the publisher uses
+the legacy sync-folder-root layout. `.syncsaw` content is never transferred by
+normal desktop or SAW synchronization.
 
 The configured interval can be 5, 10, 30, or 60 seconds. One shared operation
 gate prevents overlapping jobs. Periodic refreshes are skipped while another
@@ -143,13 +156,20 @@ existing process instead of starting another one.
 ### Remote file operations
 
 The desktop supports upload/update, download, opening a temporary downloaded
-copy, and delete. Use the **Select** checkboxes or Ctrl/Shift row selection to
-build a batch. Destructive actions always require confirmation.
+copy, and deletion. Use the **Select** checkboxes or Ctrl/Shift row selection to
+build a batch. A selected folder represents every descendant file in the
+current refresh snapshot, including files hidden by collapsed child folders.
+Destructive actions always require confirmation and show the local and Azure
+impact before proceeding.
 
 For deletion, SyncSAW removes matching desktop-local files before deleting the
-selected Blobs so automatic synchronization cannot recreate them. It publishes
-a durable SAW deletion request before deleting each Blob and verifies the
-remote deletion before refreshing. There is no broad deletion mode.
+selected Blobs so automatic synchronization cannot recreate them. Folder
+deletion expands the confirmed snapshot into exact file paths; it does not
+issue a broad Blob-prefix delete. Empty selected local directories are removed
+after their files. SyncSAW publishes a durable SAW deletion request before
+deleting each Blob and verifies the remote deletion before refreshing. A file
+created beneath the same cloud prefix after confirmation is not part of that
+operation and remains in place.
 
 ### Settings, logs, and credentials
 

@@ -49,6 +49,16 @@ replace this with shell command concatenation or reimplement file copying.
 sync, and destructive work. `SingleInstanceCoordinator` limits the desktop to
 one process per signed-in Windows user and foregrounds the existing window.
 
+`FileHierarchy` projects the flat `SyncItem` snapshot into virtual folder and
+file rows without changing synchronization semantics. The WPF `DataGrid` shows
+that projection as an expanded/collapsed flattened tree. Sorting is performed
+within each parent, folders remain before files, and folder rows aggregate
+descendant state, timestamps, size, actions, errors, and SAW status. Folder
+deletion uses the row's immutable descendant-path snapshot, de-duplicates
+overlapping selections, and sends only exact remote paths through the existing
+marker, AzCopy delete, relist, and verification pipeline. Never replace this
+with an unbounded prefix delete.
+
 `Sync-SAW.ps1` intentionally uses Azure PowerShell rather than AzCopy. It
 supports PowerShell 7 on SAW devices and remains syntactically compatible with
 Windows PowerShell 5.1 where the required Az modules are available.
@@ -59,6 +69,13 @@ Binary updates are conditionally downloaded, hash-verified, installed, and used
 for SAS rollover. Commands-only updates skip download and run the last installed
 package's `task.ps1` with validated metadata arguments. See the
 [agent guide](AGENT-GUIDE.md) before changing this protocol.
+
+`ClusterPackage.GetPayloadSourceRoot` prefers
+`<sync-root>\.syncsaw\package-source` so package-only executables and inputs
+remain outside normal synchronization. Absence of that directory preserves the
+legacy sync-root payload behavior. Descriptor bootstrap configuration is
+GZip-compressed UTF-8 JSON and then Base64 encoded to stay within the 8 KiB Blob
+metadata budget; bootstrap also accepts the prior uncompressed Base64 form.
 
 ## Build and test
 
@@ -133,6 +150,8 @@ Add or update targeted tests for changes involving:
 - Storage URL, account, container, path, and SAS validation.
 - Machine-readable AzCopy output parsing.
 - State comparison and synchronization planning.
+- File hierarchy projection, expansion, folder aggregation, sibling sorting,
+  and exact descendant-path selection.
 - Cancellation, errors, and exit-code propagation.
 - Non-overlapping scheduling and single-instance activation.
 - Settings migration and secret redaction.

@@ -28,6 +28,27 @@ public sealed class ClusterPackagePublisherTests
     }
 
     [Fact]
+    public void GetPayloadSourceRoot_PrefersIsolatedPackageSource()
+    {
+        var directory = Directory.CreateTempSubdirectory("SyncSAW.PackageSource.");
+        try
+        {
+            Assert.Equal(
+                directory.FullName,
+                ClusterPackage.GetPayloadSourceRoot(directory.FullName));
+            var packageSource = Directory.CreateDirectory(
+                Path.Combine(directory.FullName, ClusterPackage.PackageSourceRelativePath));
+            Assert.Equal(
+                packageSource.FullName,
+                ClusterPackage.GetPayloadSourceRoot(directory.FullName));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task GetResultBlobPrefix_ReadsAndValidatesTaskConfiguration()
     {
         var directory = Directory.CreateTempSubdirectory("SyncSAW.ResultPrefix.");
@@ -106,7 +127,7 @@ public sealed class ClusterPackagePublisherTests
             Assert.Equal("commands-only", metadata[ClusterPackage.ChangeTypeMetadataKey]);
             var bootstrapConfiguration =
                 JsonSerializer.Deserialize<ClusterPackageBootstrapConfiguration>(
-                    Convert.FromBase64String(
+                    DecodeCompressedMetadata(
                         metadata[ClusterPackage.BootstrapConfigurationMetadataKey]));
             Assert.NotNull(bootstrapConfiguration);
             Assert.Equal(
@@ -473,6 +494,15 @@ public sealed class ClusterPackagePublisherTests
             TenantId = "tenant-id",
             PublishClusterPackage = true
         };
+    }
+
+    private static byte[] DecodeCompressedMetadata(string value)
+    {
+        using var input = new MemoryStream(Convert.FromBase64String(value));
+        using var gzip = new GZipStream(input, CompressionMode.Decompress);
+        using var output = new MemoryStream();
+        gzip.CopyTo(output);
+        return output.ToArray();
     }
 
     private sealed class PackageRunner(

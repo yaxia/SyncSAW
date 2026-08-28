@@ -73,6 +73,7 @@ function ConvertTo-SyncRunnerHashtable {
     if ($null -eq $InputObject) {
         return $null
     }
+
     if ($InputObject -is [System.Collections.IDictionary]) {
         $result = @{}
         foreach ($key in $InputObject.Keys) {
@@ -94,6 +95,35 @@ function ConvertTo-SyncRunnerHashtable {
         })
     }
     return $InputObject
+}
+
+function ConvertFrom-SyncRunnerMetadataPayload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Value
+    )
+
+    $bytes = [Convert]::FromBase64String($Value)
+    if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x1f -or $bytes[1] -ne 0x8b) {
+        return [Text.Encoding]::UTF8.GetString($bytes)
+    }
+
+    $input = [IO.MemoryStream]::new($bytes, $false)
+    $gzip = [IO.Compression.GZipStream]::new(
+        $input,
+        [IO.Compression.CompressionMode]::Decompress
+    )
+    $reader = [IO.StreamReader]::new($gzip, [Text.Encoding]::UTF8)
+    try {
+        return $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+        $gzip.Dispose()
+        $input.Dispose()
+    }
 }
 
 function Protect-SyncRunnerLogText {
@@ -631,9 +661,8 @@ function Get-ClusterPackageUpdateDescriptor {
         )
     }
     try {
-        $bootstrapJson = [Text.Encoding]::UTF8.GetString(
-            [Convert]::FromBase64String($bootstrapConfigurationValue)
-        )
+        $bootstrapJson = ConvertFrom-SyncRunnerMetadataPayload `
+            -Value $bootstrapConfigurationValue
         $bootstrapObject = $bootstrapJson |
             ConvertFrom-Json -ErrorAction Stop
         $bootstrapConfiguration = ConvertTo-ValidatedPackageConfiguration `
