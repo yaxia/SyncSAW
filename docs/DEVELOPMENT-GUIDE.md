@@ -70,6 +70,13 @@ for SAS rollover. Commands-only updates skip download and run the last installed
 package's `task.ps1` with validated metadata arguments. See the
 [agent guide](AGENT-GUIDE.md) before changing this protocol.
 
+Bootstrap observability is a protocol surface. Important events use the stable
+console prefix `SYNCSAW_BOOTSTRAP`, and
+`syncsaw-package-status.json` is atomically replaced under `TaskExecutionRoot`.
+Keep status schema 1 free of SAS values. `CycleFailed` and `TaskFailed` must set
+`Critical` so an automation can terminate its result wait immediately;
+`TaskRunning` is refreshed each polling interval as a heartbeat.
+
 `ClusterPackage.GetPayloadSourceRoot` prefers
 `<sync-root>\.syncsaw\package-source` so package-only executables and inputs
 remain outside normal synchronization. Absence of that directory preserves the

@@ -208,6 +208,13 @@ successful earlier binary installation. Their validated metadata also refreshes
 the package-read SAS and supplies a new exact create-only result SAS without
 downloading the ZIP.
 
+On the cluster machine, important bootstrap lifecycle events are displayed in
+the PowerShell window with a `SYNCSAW_BOOTSTRAP` prefix. Current
+machine-readable state is atomically stored at
+`<TaskExecutionRoot>\syncsaw-package-status.json`; detailed history remains in
+`syncsaw-package-runner.log`. `CycleFailed` or `TaskFailed` means the current
+iteration cannot produce a result and requires action rather than more waiting.
+
 ## PowerShell SAW client
 
 Edit `scripts\Sync-SAW.config.json` once, then start the configured job without

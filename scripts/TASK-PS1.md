@@ -74,6 +74,13 @@ compress that directory into one ZIP and upload it to the exact
 cannot be replaced. See `task.example.ps1` for the Windows PowerShell
 5.1-compatible pattern.
 
+Return exit code `0` only after the expected result upload succeeds. On any
+validation, workload, packaging, or upload failure, write an actionable error
+without exposing SAS values and exit nonzero. Bootstrap records a nonzero exit
+as machine-readable `TaskFailed` in `syncsaw-package-status.json`; agents treat
+that state as terminal for the current iteration rather than waiting for a
+result timeout.
+
 ## Safety harness
 
 An agent creating or validating `task.ps1` must not restart the SyncSAW desktop

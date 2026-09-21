@@ -290,6 +290,38 @@ prevents overlapping pollers. Completed state stores both the descriptor hash
 and the last installed binary hash after the task exits; `-Once` waits for a
 started workload to finish.
 
+### Observe bootstrap and task execution
+
+Do not use result arrival as the only signal that an iteration is healthy.
+`bootstrap.ps1` prints important events directly to its console with a stable
+`SYNCSAW_BOOTSTRAP [INFO|WARNING|ERROR]` prefix and also writes:
+
+```text
+<TaskExecutionRoot>\syncsaw-package-status.json
+<TaskExecutionRoot>\syncsaw-package-runner.log
+```
+
+The status file is atomically replaced, contains no SAS values, and is the
+machine-readable current state. `TaskRunning` is refreshed every polling
+interval as a heartbeat. `CycleFailed` and `TaskFailed` set `Critical` to
+`true`; `Message` contains the redacted failure, and `ConsecutiveFailures`
+counts identical retries. The first identical failure is printed in red to the
+console; later retries remain in the log and status file without console spam.
+
+| Status state | Required agent response |
+| --- | --- |
+| `PackageDetected`, `PackageInstalled`, `TaskRunning` | Continue monitoring. |
+| `TaskSucceeded` | The workload exited successfully; allow normal sync time for its result ZIP. |
+| `CycleFailed` | Bootstrap could not validate, install, or start this package. Stop waiting for a result and fix the reported issue. |
+| `TaskFailed` | `task.ps1` exited nonzero. Stop waiting for a result and inspect the exit/error artifacts. |
+| `NoTask` | No package-root `task.ps1` exists. Fix and republish. |
+
+An agent must inspect console/status within two polling intervals after
+publication. If it cannot access any bootstrap signal, it must declare an
+observability blocker instead of waiting until a general timeout. A safety
+harness error such as a forbidden `Move-Item` is a terminal `CycleFailed`
+iteration: no task starts and no result ZIP can arrive.
+
 ## Return test results
 
 The packaged `task.ps1` reads `ResultsBlobUri` only from the supplied
@@ -318,9 +350,13 @@ The selected sync container name must be 55 characters or fewer so the
    binary, and put the new argument tokens in `ExecutionArguments`.
 3. Let the desktop synchronize changes and publish the package plus descriptor to the private
    package container. Do not restart or manipulate the desktop process.
-4. Wait for a new ZIP under the local `cluster-results` folder.
-5. Extract and analyze the result ZIP.
-6. Update the task, binary payload, or command arguments and repeat.
+4. Within two polling intervals, verify the runner reaches `TaskRunning` by
+   reading its console or `syncsaw-package-status.json`. Stop immediately on
+   `CycleFailed`, `TaskFailed`, or `NoTask`.
+5. After `TaskSucceeded`, wait for the new ZIP under the local
+   `cluster-results` folder and allow normal synchronization latency.
+6. Extract and analyze the result ZIP.
+7. Update the task, binary payload, or command arguments and repeat.
 
 `task.ps1` is responsible for running the test workload and compressing all
 output into one result ZIP. Before packaging, validate it:

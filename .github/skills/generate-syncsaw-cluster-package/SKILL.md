@@ -4,7 +4,7 @@ description: Generate or update a SyncSAW identity-less cluster package, bootstr
 compatibility: Windows cluster targets using 64-bit Windows PowerShell 5.1; publishing requires the SyncSAW desktop app and Azure CLI authentication.
 metadata:
   author: SyncSAW
-  version: "1.2"
+  version: "1.3"
 ---
 
 # Generate a SyncSAW cluster package
@@ -100,6 +100,31 @@ may provide at most 32 additional strings, each at most 1,024 UTF-8 bytes,
 without control characters, and may not provide `-BootstrapConfigPath`.
 Arbitrary executables, script paths, command strings, pipelines, and shell
 operators are not part of this protocol.
+
+## Observe execution; never wait blindly
+
+`bootstrap.ps1` writes important lifecycle messages to its console with the
+stable prefix `SYNCSAW_BOOTSTRAP` and persists the same critical state in
+`syncsaw-package-status.json` under `TaskExecutionRoot`. The status JSON contains
+no SAS values and is the machine-readable source for the current iteration.
+
+After publishing, an agent must confirm one of these states instead of waiting
+only for a result ZIP:
+
+| State | Agent action |
+| --- | --- |
+| `PackageDetected`, `PackageInstalled`, `TaskRunning` | Continue monitoring. `TaskRunning` is refreshed as a heartbeat each polling interval. |
+| `TaskSucceeded` | Wait only for normal synchronization to deliver the result ZIP. |
+| `CycleFailed`, `TaskFailed` | Critical terminal condition for the current iteration. Stop waiting immediately, read `Message`, fix or republish, and do not wait for a timeout. |
+| `NoTask` | The package cannot produce a result. Fix the package layout and republish. |
+
+The console prints `SYNCSAW_BOOTSTRAP [ERROR]` for the first occurrence of a
+failure. Identical retries remain in `syncsaw-package-runner.log` and increment
+`ConsecutiveFailures` in the status JSON without flooding the console. If the
+agent cannot access the console, status JSON, or runner log, it must report that
+observability is blocked rather than waiting indefinitely. Before publishing,
+always run the local task safety harness; a harness rejection is a
+`CycleFailed` result and no task result ZIP will be created.
 
 ## Safety
 

@@ -50,6 +50,7 @@ $script:PackageConfigName = 'cluster_package.config'
 $script:PackageTaskName = 'task.ps1'
 $script:StateFileName = '.syncsaw-package-state.json'
 $script:LogFileName = 'syncsaw-package-runner.log'
+$script:StatusFileName = 'syncsaw-package-status.json'
 $script:MaximumPackageBytes = 2GB
 $script:MaximumExtractedBytes = 4GB
 $script:MaximumArchiveEntries = 10000
@@ -146,14 +147,30 @@ function Write-SyncRunnerLog {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$Message
+        [Parameter(Mandatory)][string]$Message,
+        [Parameter()]
+        [ValidateSet('INFO', 'WARNING', 'ERROR')]
+        [string]$Level = 'INFO',
+        [Parameter()]
+        [switch]$NoConsole
     )
 
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
         [void](New-Item -ItemType Directory -Path $Root -Force)
     }
-    $entry = '{0} {1}' -f [DateTimeOffset]::Now.ToString('O'),
-        (Protect-SyncRunnerLogText -Text $Message)
+    $safeMessage = Protect-SyncRunnerLogText -Text $Message
+    $entry = '{0} [{1}] {2}' -f [DateTimeOffset]::Now.ToString('O'),
+        $Level,
+        $safeMessage
+    if (-not $NoConsole) {
+        $foregroundColor = switch ($Level) {
+            'ERROR' { 'Red' }
+            'WARNING' { 'Yellow' }
+            default { 'Cyan' }
+        }
+        Write-Host "SYNCSAW_BOOTSTRAP [$Level] $safeMessage" `
+            -ForegroundColor $foregroundColor
+    }
     Add-Content -LiteralPath (Join-Path $Root $script:LogFileName) `
         -Value $entry -Encoding UTF8
 }
@@ -875,6 +892,71 @@ function Save-SyncRunnerJson {
         Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Write-SyncRunnerStatus {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            'RunnerStarted',
+            'PackageDetected',
+            'PackageInstalled',
+            'TaskRunning',
+            'TaskSucceeded',
+            'TaskFailed',
+            'CycleFailed',
+            'NoTask'
+        )]
+        [string]$State,
+        [Parameter(Mandatory)]
+        [ValidateSet('INFO', 'WARNING', 'ERROR')]
+        [string]$Level,
+        [Parameter(Mandatory)][string]$Message,
+        [Parameter()][AllowNull()][object]$RemoteMetadata,
+        [Parameter()][AllowNull()][Diagnostics.Process]$TaskProcess,
+        [Parameter()][int]$ConsecutiveFailures = 0
+    )
+
+    $safeMessage = Protect-SyncRunnerLogText -Text $Message
+    $status = [ordered]@{
+        SchemaVersion = 1
+        State = $State
+        Level = $Level
+        Critical = $Level -eq 'ERROR'
+        Message = $safeMessage
+        UpdatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        ConsecutiveFailures = $ConsecutiveFailures
+        PackageETag = $null
+        PackageSha256 = $null
+        PackageBuiltUtc = $null
+        ChangeType = $null
+        TaskProcessId = $null
+        TaskExitCode = $null
+    }
+    if ($null -ne $RemoteMetadata) {
+        $status.PackageETag = [string]$RemoteMetadata.ETag
+        if ($null -ne $RemoteMetadata.UpdateDescriptor) {
+            $status.PackageSha256 =
+                [string]$RemoteMetadata.UpdateDescriptor.PackageSha256
+            $status.PackageBuiltUtc = (
+                [DateTimeOffset]$RemoteMetadata.UpdateDescriptor.PackageBuiltUtc
+            ).ToUniversalTime().ToString('O')
+            $status.ChangeType =
+                [string]$RemoteMetadata.UpdateDescriptor.ChangeType
+        }
+    }
+    if ($null -ne $TaskProcess) {
+        $status.TaskProcessId = [int]$TaskProcess.Id
+        if ($TaskProcess.HasExited) {
+            $status.TaskExitCode = [int]$TaskProcess.ExitCode
+        }
+    }
+
+    Save-SyncRunnerJson `
+        -Path (Join-Path $Root $script:StatusFileName) `
+        -Value $status
 }
 
 function Copy-SyncRunnerStream {
@@ -1765,17 +1847,53 @@ function Invoke-SyncRunner {
             )
         }
 
-        Write-SyncRunnerLog -Root $root -Message 'Package runner started.'
+        $startMessage =
+            "Package runner started. Machine status: " +
+            (Join-Path $root $script:StatusFileName)
+        Write-SyncRunnerLog -Root $root -Message $startMessage
+        Write-SyncRunnerStatus `
+            -Root $root `
+            -State 'RunnerStarted' `
+            -Level 'INFO' `
+            -Message $startMessage
         $activeTaskProcess = $null
         $activeInstallation = $null
+        $lastFailureSignature = $null
+        $lastFailedETag = $null
+        $consecutiveFailures = 0
         while ($true) {
+            $remote = $null
             try {
                 $skipPackageCheck = $false
                 if ($null -ne $activeTaskProcess) {
                     $skipPackageCheck = $true
                     if ($activeTaskProcess.HasExited) {
-                        Write-SyncRunnerLog -Root $root `
-                            -Message "task.ps1 exited with code $($activeTaskProcess.ExitCode)."
+                        $taskExitCode = [int]$activeTaskProcess.ExitCode
+                        $taskExitMessage =
+                            "task.ps1 exited with code $taskExitCode."
+                        $taskLevel = if ($taskExitCode -eq 0) {
+                            'INFO'
+                        }
+                        else {
+                            'ERROR'
+                        }
+                        $taskState = if ($taskExitCode -eq 0) {
+                            'TaskSucceeded'
+                        }
+                        else {
+                            'TaskFailed'
+                        }
+                        Write-SyncRunnerLog `
+                            -Root $root `
+                            -Message $taskExitMessage `
+                            -Level $taskLevel
+                        Write-SyncRunnerStatus `
+                            -Root $root `
+                            -State $taskState `
+                            -Level $taskLevel `
+                            -Message $taskExitMessage `
+                            -RemoteMetadata $activeInstallation.Metadata `
+                            -TaskProcess $activeTaskProcess
                         Save-CompletedPackageState `
                             -Path $statePath `
                             -InstalledPackage $activeInstallation `
@@ -1788,8 +1906,19 @@ function Invoke-SyncRunner {
                         $activeInstallation = $null
                     }
                     else {
+                        $runningMessage =
+                            'task.ps1 is still running; package polling was skipped. ' +
+                            "Process ID: $($activeTaskProcess.Id)."
                         Write-SyncRunnerLog -Root $root `
-                            -Message 'task.ps1 is still running; package polling was skipped.'
+                            -Message $runningMessage `
+                            -NoConsole
+                        Write-SyncRunnerStatus `
+                            -Root $root `
+                            -State 'TaskRunning' `
+                            -Level 'INFO' `
+                            -Message $runningMessage `
+                            -RemoteMetadata $activeInstallation.Metadata `
+                            -TaskProcess $activeTaskProcess
                     }
                 }
 
@@ -1803,12 +1932,24 @@ function Invoke-SyncRunner {
                     $remote = Get-RemotePackageMetadata `
                         -Uri ([string]$configuration.PackageUri)
                     if (Test-RemotePackageUpdateRequired -Remote $remote -State $state) {
-                        Write-SyncRunnerLog -Root $root `
-                            -Message (
-                                "New $($remote.UpdateDescriptor.ChangeType) package detected; " +
-                                "built $($remote.UpdateDescriptor.PackageBuiltUtc.ToString('O')), " +
-                                "SHA-256 $($remote.UpdateDescriptor.PackageSha256)."
-                            )
+                        $isRetryingFailedPackage =
+                            $consecutiveFailures -gt 0 -and
+                            [string]$remote.ETag -eq $lastFailedETag
+                        $detectedMessage = (
+                            "New $($remote.UpdateDescriptor.ChangeType) package detected; " +
+                            "built $($remote.UpdateDescriptor.PackageBuiltUtc.ToString('O')), " +
+                            "SHA-256 $($remote.UpdateDescriptor.PackageSha256)."
+                        )
+                        Write-SyncRunnerLog `
+                            -Root $root `
+                            -Message $detectedMessage `
+                            -NoConsole:$isRetryingFailedPackage
+                        Write-SyncRunnerStatus `
+                            -Root $root `
+                            -State 'PackageDetected' `
+                            -Level 'INFO' `
+                            -Message $detectedMessage `
+                            -RemoteMetadata $remote
                         if ($remote.UpdateDescriptor.ChangeType -ceq
                             'commands-only') {
                             $installed =
@@ -1830,6 +1971,12 @@ function Invoke-SyncRunner {
                             Write-SyncRunnerLog -Root $root `
                                 -Message "Installed package '$($installed.PackageDirectory)'."
                         }
+                        Write-SyncRunnerStatus `
+                            -Root $root `
+                            -State 'PackageInstalled' `
+                            -Level 'INFO' `
+                            -Message "Package is ready at '$($installed.PackageDirectory)'." `
+                            -RemoteMetadata $remote
                         Save-RefreshedBootstrapConfiguration `
                             -Path $resolvedConfigPath `
                             -Configuration $configuration `
@@ -1842,12 +1989,30 @@ function Invoke-SyncRunner {
                             -UpdateDescriptor $installed.UpdateDescriptor
                         if ($null -ne $activeTaskProcess) {
                             $activeInstallation = $installed
-                            Write-SyncRunnerLog -Root $root `
-                                -Message 'Started task.ps1.'
+                            $taskStartedMessage =
+                                "Started task.ps1 with process ID " +
+                                "$($activeTaskProcess.Id)."
+                            Write-SyncRunnerLog `
+                                -Root $root `
+                                -Message $taskStartedMessage
+                            Write-SyncRunnerStatus `
+                                -Root $root `
+                                -State 'TaskRunning' `
+                                -Level 'INFO' `
+                                -Message $taskStartedMessage `
+                                -RemoteMetadata $remote `
+                                -TaskProcess $activeTaskProcess
                         }
                         else {
                             Write-SyncRunnerLog -Root $root `
-                                -Message 'Package has no task.ps1; execution was skipped.'
+                                -Message 'Package has no task.ps1; execution was skipped.' `
+                                -Level 'WARNING'
+                            Write-SyncRunnerStatus `
+                                -Root $root `
+                                -State 'NoTask' `
+                                -Level 'WARNING' `
+                                -Message 'Package has no task.ps1; execution was skipped.' `
+                                -RemoteMetadata $remote
                             Save-CompletedPackageState `
                                 -Path $statePath `
                                 -InstalledPackage $installed `
@@ -1856,12 +2021,42 @@ function Invoke-SyncRunner {
                                 -ExecutionRoot $root `
                                 -CurrentPackageDirectory $installed.PackageDirectory
                         }
+                        $lastFailureSignature = $null
+                        $lastFailedETag = $null
+                        $consecutiveFailures = 0
                     }
                 }
             }
             catch {
-                Write-SyncRunnerLog -Root $root `
-                    -Message "Package cycle failed: $($_.Exception.Message)"
+                $failureMessage =
+                    "Package cycle failed: $($_.Exception.Message)"
+                $failureETag = if ($null -eq $remote) {
+                    ''
+                }
+                else {
+                    [string]$remote.ETag
+                }
+                $lastFailedETag = $failureETag
+                $failureSignature = '{0}|{1}' -f $failureETag, $failureMessage
+                if ($failureSignature -eq $lastFailureSignature) {
+                    $consecutiveFailures++
+                }
+                else {
+                    $lastFailureSignature = $failureSignature
+                    $consecutiveFailures = 1
+                }
+                Write-SyncRunnerLog `
+                    -Root $root `
+                    -Message $failureMessage `
+                    -Level 'ERROR' `
+                    -NoConsole:($consecutiveFailures -gt 1)
+                Write-SyncRunnerStatus `
+                    -Root $root `
+                    -State 'CycleFailed' `
+                    -Level 'ERROR' `
+                    -Message $failureMessage `
+                    -RemoteMetadata $remote `
+                    -ConsecutiveFailures $consecutiveFailures
                 if ($Once) {
                     throw
                 }
@@ -1885,5 +2080,14 @@ function Invoke-SyncRunner {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-SyncRunner
+    try {
+        Invoke-SyncRunner
+    }
+    catch {
+        $terminationMessage = Protect-SyncRunnerLogText `
+            -Text "Bootstrap terminated: $($_.Exception.Message)"
+        Write-Host "SYNCSAW_BOOTSTRAP [ERROR] $terminationMessage" `
+            -ForegroundColor Red
+        throw [InvalidOperationException]::new($terminationMessage)
+    }
 }

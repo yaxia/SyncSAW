@@ -15,7 +15,7 @@ restarting protected processes.
 | Desktop client | `%LOCALAPPDATA%\SyncSAW\Logs` |
 | AzCopy | `%USERPROFILE%\.azcopy` and the error displayed by SyncSAW |
 | PowerShell SAW client | Daily transcript beside the script, or the configured `LogDirectory` |
-| Cluster bootstrap | `syncsaw-package-runner.log` under the bootstrap execution root |
+| Cluster bootstrap | Console output prefixed `SYNCSAW_BOOTSTRAP`, atomic `syncsaw-package-status.json`, and `syncsaw-package-runner.log` under `TaskExecutionRoot` |
 | Cluster task | The newly created result archive under `cluster-results` |
 
 SAS query strings and signatures should always be redacted. Never paste a
@@ -79,6 +79,8 @@ registered repositories, and installed module versions without making changes.
 | Package schema is rejected | Deploy the current schema-6 `bootstrap.ps1` and config. Older schema-2 through schema-5 runners are intentionally incompatible. |
 | Archive validation fails | Check descriptor hash, size, expanded size, entry count, traversal paths, reparse points, root `task.ps1`, schema-6 config, and the task safety harness. |
 | `task.ps1` is rejected | Run `scripts\Test-TaskScriptSafety.ps1` locally and fix every additive-only violation before publishing. |
+| Agent waits for a result that will never arrive | Read `syncsaw-package-status.json`. `CycleFailed`, `TaskFailed`, or `NoTask` ends the current iteration; stop waiting and act on `Message`. `TaskRunning` is refreshed every polling interval. If no console, status, or log is accessible, report an observability blocker rather than waiting for a general timeout. |
+| Console repeats no error but the log grows | Identical failures are printed to the console once to avoid flooding. The status file remains `Critical: true`, updates `ConsecutiveFailures`, and the full retries remain in `syncsaw-package-runner.log`. |
 | Result upload returns `409` or `412` | The exact result Blob already exists. Generate a new unique result path and create-only SAS; never overwrite the existing Blob. |
 | No result reaches the development machine | Confirm the result Blob is under the normal sync container's `cluster-results` path, then inspect desktop sync status without deleting or replacing the Blob. |
 

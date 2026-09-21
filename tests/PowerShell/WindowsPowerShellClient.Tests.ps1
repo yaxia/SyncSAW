@@ -396,6 +396,59 @@ if (`$values.sp -ne 'r' -or `$values.sig -ne 'test') { exit 2 }
         } | Should -Throw '*cannot change*entrypoint*'
     }
 
+    It 'prints important runner messages and persists machine-readable critical status' {
+        $root = Join-Path $TestDrive 'runner-observability'
+        [void](New-Item -ItemType Directory -Path $root)
+        $console = @(
+            Write-SyncRunnerLog `
+                -Root $root `
+                -Level 'ERROR' `
+                -Message (
+                    'Package cycle failed for ' +
+                    'https://account123.blob.core.windows.net/sync-package/' +
+                    'cluster_package.zip?sp=r&sig=secret'
+                ) 6>&1
+        ) -join [Environment]::NewLine
+
+        $console | Should -Match 'SYNCSAW_BOOTSTRAP \[ERROR\]'
+        $console | Should -Not -Match 'sig=secret'
+        $log = Get-Content `
+            -LiteralPath (Join-Path $root 'syncsaw-package-runner.log') `
+            -Raw
+        $log | Should -Match '\[ERROR\]'
+        $log | Should -Not -Match 'sig=secret'
+
+        $remote = [pscustomobject]@{
+            ETag = '"etag-critical"'
+            UpdateDescriptor = [pscustomobject]@{
+                PackageSha256 = 'b' * 64
+                PackageBuiltUtc = [DateTimeOffset]'2026-09-21T06:00:00Z'
+                ChangeType = 'binary'
+            }
+        }
+        Write-SyncRunnerStatus `
+            -Root $root `
+            -State 'CycleFailed' `
+            -Level 'ERROR' `
+            -Message 'task.ps1 failed the additive-only safety harness.' `
+            -RemoteMetadata $remote `
+            -ConsecutiveFailures 3
+
+        $status = Get-Content `
+            -LiteralPath (Join-Path $root 'syncsaw-package-status.json') `
+            -Raw |
+            ConvertFrom-Json
+        $status.SchemaVersion | Should -Be 1
+        $status.State | Should -Be 'CycleFailed'
+        $status.Level | Should -Be 'ERROR'
+        $status.Critical | Should -BeTrue
+        $status.ConsecutiveFailures | Should -Be 3
+        $status.PackageETag | Should -Be '"etag-critical"'
+        $status.PackageSha256 | Should -Be ('b' * 64)
+        $status.ChangeType | Should -Be 'binary'
+        $status.Message | Should -Match 'safety harness'
+    }
+
     It 'hashes the downloaded package and safely quotes command-only arguments' {
         $packagePath = Join-Path $TestDrive 'hash-input.zip'
         [IO.File]::WriteAllText($packagePath, 'package bytes')
@@ -762,6 +815,14 @@ exit 0
         $content | Should -Match 'Get-InstalledClusterPackageForCommandUpdate'
         $content | Should -Not -Match '-WorkingDirectory \$PackageDirectory `\s+-Wait'
         $content | Should -Match 'task\.ps1 is still running; package polling was skipped'
+        $content | Should -Match 'SYNCSAW_BOOTSTRAP \[\$Level\]'
+        $content | Should -Match 'Bootstrap terminated:'
+        $content | Should -Match 'syncsaw-package-status\.json'
+        $content | Should -Match '\$taskState = if'
+        $content | Should -Match "'TaskFailed'"
+        $content | Should -Match '-State \$taskState'
+        $content | Should -Match "-State 'CycleFailed'"
+        $content | Should -Match 'ConsecutiveFailures'
         $content | Should -Match 'Initialize-SecureDirectory'
         $content | Should -Match 'Assert-NoReparsePointInPath'
         $content | Should -Match 'SetAccessRuleProtection\(\$true, \$false\)'
